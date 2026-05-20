@@ -27,6 +27,7 @@ from tradestation_nt_community.parsing.execution import (
 )
 from tradestation_nt_community.parsing.instruments import (
     determine_price_precision,
+    parse_expiration_date,
     parse_instrument,
 )
 from tradestation_nt_community.common.enums import TradeStationBarUnit
@@ -773,3 +774,119 @@ class TestParseOptionInstrument:
         instrument = parse_instrument("AAPL 250321P00170000", data, TRADESTATION_VENUE)
         assert instrument is not None
         assert instrument.option_kind == OptionKind.PUT
+
+    def test_equity_option_has_equity_asset_class(self):
+        from nautilus_trader.model.enums import AssetClass
+        data = self._load_option()
+        instrument = parse_instrument("AAPL 250321C00175000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.asset_class == AssetClass.EQUITY
+
+
+class TestParseIndexInstrument:
+    """Tests for parse_instrument() with INDEX asset type."""
+
+    def _load_index(self) -> dict:
+        return json.loads((_RESOURCES / "symbol_detail_index.json").read_text())
+
+    def test_parse_index_returns_equity(self):
+        data = self._load_index()
+        instrument = parse_instrument("$SPX.X", data, TRADESTATION_VENUE)
+        assert isinstance(instrument, Equity)
+
+    def test_parse_index_symbol(self):
+        data = self._load_index()
+        instrument = parse_instrument("$SPX.X", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.id.symbol.value == "$SPX.X"
+
+    def test_parse_index_currency(self):
+        data = self._load_index()
+        instrument = parse_instrument("$SPX.X", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.quote_currency.code == "USD"
+
+    def test_parse_index_price_precision(self):
+        data = self._load_index()
+        instrument = parse_instrument("$SPX.X", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.price_precision == 2
+        assert float(instrument.price_increment) == pytest.approx(0.01, rel=1e-4)
+
+    def test_parse_index_no_isin(self):
+        data = self._load_index()
+        instrument = parse_instrument("$SPX.X", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.isin is None
+
+
+class TestParseIndexOptionInstrument:
+    """Tests for parse_instrument() with OPTION asset type where underlying is an index."""
+
+    def _load_index_option(self) -> dict:
+        return json.loads((_RESOURCES / "symbol_detail_index_option.json").read_text())
+
+    def test_parse_index_option_returns_option_contract(self):
+        from nautilus_trader.model.instruments import OptionContract
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert isinstance(instrument, OptionContract)
+
+    def test_parse_index_option_has_index_asset_class(self):
+        from nautilus_trader.model.enums import AssetClass
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.asset_class == AssetClass.INDEX
+
+    def test_parse_index_option_strike(self):
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert float(instrument.strike_price) == pytest.approx(5800.0, rel=1e-4)
+
+    def test_parse_index_option_expiration(self):
+        import pandas as pd
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        expiry = pd.Timestamp(instrument.expiration_ns, unit="ns", tz="UTC")
+        assert expiry.year == 2025
+        assert expiry.month == 3
+        assert expiry.day == 21
+
+    def test_parse_index_option_underlying(self):
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.underlying == "$SPX.X"
+
+    def test_parse_index_option_kind_call(self):
+        from nautilus_trader.model.enums import OptionKind
+        data = self._load_index_option()
+        instrument = parse_instrument("$SPX.X 250321C05800000", data, TRADESTATION_VENUE)
+        assert instrument is not None
+        assert instrument.option_kind == OptionKind.CALL
+
+
+class TestParseExpirationDate:
+    """Tests for parse_expiration_date()."""
+
+    def test_parse_date_from_date_field(self):
+        from datetime import date
+        raw = {"Date": "2025-01-17", "ExpirationDate": "2025-01-17T00:00:00Z", "Type": "Monthly"}
+        result = parse_expiration_date(raw)
+        assert result["date"] == date(2025, 1, 17)
+        assert result["type"] == "Monthly"
+
+    def test_parse_date_falls_back_to_expiration_date_field(self):
+        from datetime import date
+        raw = {"ExpirationDate": "2025-03-21T00:00:00Z", "Type": "Weekly"}
+        result = parse_expiration_date(raw)
+        assert result["date"] == date(2025, 3, 21)
+        assert result["type"] == "Weekly"
+
+    def test_parse_date_type_preserved(self):
+        raw = {"Date": "2025-01-24", "Type": "Weekly"}
+        result = parse_expiration_date(raw)
+        assert result["type"] == "Weekly"

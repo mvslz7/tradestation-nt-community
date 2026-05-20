@@ -4,12 +4,14 @@ Async mock TradeStation HTTP client for adapter tests — no network calls.
 All public methods are ``async def`` matching the Phase 6 async client interface.
 """
 import json
+from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from tradestation_nt_community.common.enums import TradeStationBarUnit
 from tradestation_nt_community.http.client import TradeStationHttpClient
+from tradestation_nt_community.common.enums import ExpirationTypeParam, OptionExpiration
 
 
 _RESOURCES = Path(__file__).parent / "resources"
@@ -58,10 +60,32 @@ class MockTradeStationHttpClient(TradeStationHttpClient):
     async def get_symbol_details(self, symbol: str) -> dict[str, Any]:
         if symbol in ("AAPL", "MSFT", "TSLA"):
             return json.loads((_RESOURCES / "symbol_detail_equity.json").read_text())
+        if symbol.startswith("$") and " " not in symbol:
+            return json.loads((_RESOURCES / "symbol_detail_index.json").read_text())
         # Option symbols contain a space (OCC format: "AAPL 250321C00175000")
         if " " in symbol:
+            underlying = symbol.split()[0]
+            if underlying.startswith("$"):
+                return json.loads((_RESOURCES / "symbol_detail_index_option.json").read_text())
             return json.loads((_RESOURCES / "symbol_detail_option.json").read_text())
         return json.loads((_RESOURCES / "symbol_detail_future.json").read_text())
+
+    async def get_option_expirations(
+        self,
+        underlying: str,
+        expiration_type: ExpirationTypeParam = "monthly",
+    ) -> list[OptionExpiration]:
+        from tradestation_nt_community.parsing.instruments import parse_expiration_date
+        data = json.loads((_RESOURCES / "option_expirations_response.json").read_text())
+        return [parse_expiration_date(e) for e in data.get("Expirations", [])]
+
+    async def get_option_strikes(
+        self,
+        underlying: str,
+        expiration: date | None = None,
+    ) -> list[str]:
+        data = json.loads((_RESOURCES / "option_strikes_response.json").read_text())
+        return data.get("Strikes", [])
 
     async def get_accounts(self) -> list[dict[str, Any]]:
         data = json.loads((_RESOURCES / "accounts_response.json").read_text())

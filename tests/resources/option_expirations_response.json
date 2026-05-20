@@ -1,0 +1,7 @@
+{
+  "Expirations": [
+    {"Date": "2025-01-17T00:00:00Z", "ExpirationDate": "2025-01-17T00:00:00Z", "Type": "Monthly"},
+    {"Date": "2025-01-24T00:00:00Z", "ExpirationDate": "2025-01-24T00:00:00Z", "Type": "Weekly"},
+    {"Date": "2025-03-21T00:00:00Z", "ExpirationDate": "2025-03-21T00:00:00Z", "Type": "Monthly"}
+  ]
+}

@@ -2,6 +2,7 @@
 Parsing functions for TradeStation instrument definitions.
 """
 import logging
+from datetime import date
 
 import pandas as pd
 
@@ -9,9 +10,23 @@ from nautilus_trader.model.enums import AssetClass, OptionKind
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
 from nautilus_trader.model.instruments import Equity, FuturesContract, OptionContract
 from nautilus_trader.model.objects import Currency, Price, Quantity
+from tradestation_nt_community.common.enums import OptionExpiration
 
 
 _log = logging.getLogger(__name__)
+
+
+def parse_expiration_date(raw: dict) -> OptionExpiration:
+    """Convert a raw TradeStation expiration dict to an OptionExpiration.
+
+    Prefers the ``Date`` field ("YYYY-MM-DD"); falls back to the first 10
+    characters of ``ExpirationDate`` ("YYYY-MM-DDTHH:MM:SSZ").
+    """
+    raw_date = (raw.get("Date") or raw.get("ExpirationDate", ""))[:10]
+    return OptionExpiration(
+        date=date.fromisoformat(raw_date),
+        type=raw.get("Type", ""),
+    )
 
 
 def parse_instrument(
@@ -91,9 +106,26 @@ def parse_instrument(
                 ts_init=ts_init,
             )
 
-        elif asset_type == "OPTION":
+        elif asset_type == "INDEX":
+            return Equity(
+                instrument_id=instrument_id,
+                raw_symbol=Symbol(data.get("Symbol", symbol)),
+                currency=Currency.from_str(data.get("Currency", "USD")),
+                price_precision=price_precision,
+                price_increment=price_increment,
+                lot_size=lot_size,
+                isin=None,
+                ts_event=ts_event,
+                ts_init=ts_init,
+            )
+
+        elif asset_type in ("OPTION", "STOCKOPTION", "OP"):
+            underlying_sym = data.get("Underlying", symbol.split()[0])
+            opt_asset_class = (
+                AssetClass.INDEX if underlying_sym.startswith("$") else AssetClass.EQUITY
+            )
             return _parse_option(symbol, data, instrument_id, price_increment,
-                                 price_precision, lot_size, ts_event)
+                                 price_precision, lot_size, ts_event, opt_asset_class)
 
         else:
             _log.warning(f"Unsupported asset type '{asset_type}' for symbol {symbol}")
@@ -124,6 +156,7 @@ def _parse_option(
     price_precision: int,
     lot_size: Quantity,
     ts_event: int,
+    asset_class: AssetClass = AssetClass.EQUITY,
 ) -> OptionContract | None:
     """Parse an OPTION asset type from a TradeStation symbol-details dict.
 
@@ -160,12 +193,18 @@ def _parse_option(
         if strike_str:
             strike_price = Price.from_str(str(float(strike_str)))
         else:
-            # Parse from OCC symbol: last 8 digits ÷ 1000 = strike
+            # Parse strike from symbol right-part (after the space).
+            # Supports both formats:
+            #   OCC 8-digit:  "AAPL 250321C00175000" → right[7:] = "00175000" → /1000
+            #   Decimal:      "AAPL 260608C305"      → right[7:] = "305"      → float()
             try:
                 raw_sym = data.get("Symbol", symbol)
-                occ_right = raw_sym.split()[1]  # e.g. "250321C00175000"
-                strike_raw = int(occ_right[7:])  # last 8 digits
-                strike_val = strike_raw / 1000.0
+                right = raw_sym.split()[1]  # e.g. "260608C305" or "250321C00175000"
+                strike_raw_str = right[7:]  # everything after YYMMDDX
+                if len(strike_raw_str) == 8 and strike_raw_str.isdigit():
+                    strike_val = int(strike_raw_str) / 1000.0
+                else:
+                    strike_val = float(strike_raw_str)
                 strike_price = Price(round(strike_val, price_precision), price_precision)
             except Exception:
                 strike_price = Price(0.0, price_precision)
@@ -173,7 +212,7 @@ def _parse_option(
         # --- Option kind (Call / Put) ---
         option_type_str = data.get("OptionType", "")
         if not option_type_str:
-            # Parse from OCC symbol char at position 6: C or P
+            # Position 6 in the right part is always C or P (both OCC and decimal formats)
             try:
                 raw_sym = data.get("Symbol", symbol)
                 occ_right = raw_sym.split()[1]
@@ -188,7 +227,7 @@ def _parse_option(
         return OptionContract(
             instrument_id=instrument_id,
             raw_symbol=Symbol(data.get("Symbol", symbol)),
-            asset_class=AssetClass.EQUITY,
+            asset_class=asset_class,
             currency=Currency.from_str(data.get("Currency", "USD")),
             price_precision=price_precision,
             price_increment=price_increment,

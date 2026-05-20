@@ -875,3 +875,193 @@ class TestPlaceOrderAssetType:
         orders = json_body.get("Orders", [])
         assert len(orders) == 1
         assert orders[0].get("AssetType") == "OP"
+
+
+# =============================================================================
+# get_option_expirations()
+# =============================================================================
+
+class TestGetOptionExpirations:
+    """get_option_expirations() fetches and parses expiration dates."""
+
+    @pytest.mark.asyncio
+    async def test_returns_parsed_expirations(self, http_client):
+        """Successful response returns a list of OptionExpiration dicts."""
+        from datetime import date
+        data = _load("option_expirations_response.json")
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(200, data))
+
+        result = await http_client.get_option_expirations("AAPL")
+
+        assert len(result) == 3
+        assert result[0]["date"] == date(2025, 1, 17)
+        assert result[0]["type"] == "Monthly"
+
+    @pytest.mark.asyncio
+    async def test_passes_expiration_type_param(self, http_client):
+        """expiration_type is forwarded as ``expirationtype`` query param."""
+        captured = {}
+        data = _load("option_expirations_response.json")
+
+        async def mock_get(url, headers=None, params=None, **kw):
+            captured["params"] = params
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_expirations("AAPL", "weekly")
+
+        assert captured["params"].get("expirationtype") == "weekly"
+
+    @pytest.mark.asyncio
+    async def test_default_expiration_type_is_monthly(self, http_client):
+        """Default expiration_type sent as 'monthly'."""
+        captured = {}
+        data = _load("option_expirations_response.json")
+
+        async def mock_get(url, headers=None, params=None, **kw):
+            captured["params"] = params
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_expirations("AAPL")
+
+        assert captured["params"].get("expirationtype") == "monthly"
+
+    @pytest.mark.asyncio
+    async def test_url_contains_underlying(self, http_client):
+        """URL path ends with the underlying symbol."""
+        captured = {}
+        data = _load("option_expirations_response.json")
+
+        async def mock_get(url, headers=None, **kw):
+            captured["url"] = url
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_expirations("$SPX.X")
+
+        assert "$SPX.X" in captured["url"]
+        assert "expirations" in captured["url"]
+
+    @pytest.mark.asyncio
+    async def test_empty_expirations_returns_empty_list(self, http_client):
+        """Empty Expirations array returns []."""
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(200, {"Expirations": []}))
+        result = await http_client.get_option_expirations("AAPL")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_raises_on_non_200(self, http_client):
+        """Non-200 response raises an exception."""
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(404, {}))
+        with pytest.raises(Exception, match="Get option expirations failed"):
+            await http_client.get_option_expirations("AAPL")
+
+    @pytest.mark.asyncio
+    async def test_all_expiration_types_param(self, http_client):
+        """expiration_type='all' is forwarded correctly."""
+        captured = {}
+        data = _load("option_expirations_response.json")
+
+        async def mock_get(url, headers=None, params=None, **kw):
+            captured["params"] = params
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_expirations("AAPL", "all")
+
+        assert captured["params"].get("expirationtype") == "all"
+
+
+# =============================================================================
+# get_option_strikes()
+# =============================================================================
+
+class TestGetOptionStrikes:
+    """get_option_strikes() fetches available strike prices."""
+
+    @pytest.mark.asyncio
+    async def test_returns_strike_list(self, http_client):
+        """Successful response returns a list of strike-price strings."""
+        data = _load("option_strikes_response.json")
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(200, data))
+
+        result = await http_client.get_option_strikes("$SPX.X")
+
+        assert result == ["5700.00", "5750.00", "5800.00", "5850.00", "5900.00"]
+
+    @pytest.mark.asyncio
+    async def test_url_contains_underlying(self, http_client):
+        """URL path ends with the underlying symbol."""
+        captured = {}
+        data = _load("option_strikes_response.json")
+
+        async def mock_get(url, headers=None, **kw):
+            captured["url"] = url
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_strikes("AAPL")
+
+        assert "AAPL" in captured["url"]
+        assert "strikes" in captured["url"]
+
+    @pytest.mark.asyncio
+    async def test_sends_expiration_date_in_american_format(self, http_client):
+        """expiration date is formatted as MM-DD-YYYY in the query params."""
+        from datetime import date
+        captured = {}
+        data = _load("option_strikes_response.json")
+
+        async def mock_get(url, headers=None, params=None, **kw):
+            captured["params"] = params
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_strikes("AAPL", date(2025, 3, 21))
+
+        assert captured["params"].get("expiration") == "03-21-2025"
+
+    @pytest.mark.asyncio
+    async def test_no_expiration_omits_param(self, http_client):
+        """When expiration is None the query string has no 'expiration' key."""
+        captured = {}
+        data = _load("option_strikes_response.json")
+
+        async def mock_get(url, headers=None, params=None, **kw):
+            captured["params"] = params
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_strikes("AAPL")
+
+        assert "expiration" not in (captured.get("params") or {})
+
+    @pytest.mark.asyncio
+    async def test_empty_strikes_returns_empty_list(self, http_client):
+        """Empty Strikes array returns []."""
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(200, {"Strikes": []}))
+        result = await http_client.get_option_strikes("AAPL")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_raises_on_non_200(self, http_client):
+        """Non-200 response raises an exception."""
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(500, {}))
+        with pytest.raises(Exception, match="Get option strikes failed"):
+            await http_client.get_option_strikes("AAPL")
+
+    @pytest.mark.asyncio
+    async def test_index_underlying_accepted(self, http_client):
+        """Index underlyings like '$SPX.X' are passed through without modification."""
+        captured = {}
+        data = _load("option_strikes_response.json")
+
+        async def mock_get(url, headers=None, **kw):
+            captured["url"] = url
+            return _mock_resp(200, data)
+
+        http_client._httpx.get = mock_get
+        await http_client.get_option_strikes("$SPX.X")
+
+        assert "$SPX.X" in captured["url"]

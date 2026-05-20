@@ -1,0 +1,16 @@
+{
+  "Symbol": "$SPX.X",
+  "Description": "S&P 500 Index",
+  "AssetType": "INDEX",
+  "Currency": "USD",
+  "PriceFormat": {
+    "Decimals": 2,
+    "Increment": "0.01",
+    "PointValue": 1
+  },
+  "QuantityFormat": {
+    "Decimals": 0,
+    "Increment": "1",
+    "MinimumTradeQuantity": "1"
+  }
+}

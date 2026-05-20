@@ -1,8 +1,18 @@
 """
-TradeStation adapter enumerations.
+TradeStation adapter enumerations and lightweight option types.
 """
 
+from datetime import date
 from enum import Enum
+from typing import Literal, TypedDict
+
+
+ExpirationTypeParam = Literal["all", "weekly", "monthly", "quarterly"]
+
+
+class OptionExpiration(TypedDict):
+    date: date   # parsed from the raw "Date" field
+    type: str    # "Monthly" | "Weekly" | "Quarterly"
 
 
 class TradeStationAssetType(str, Enum):

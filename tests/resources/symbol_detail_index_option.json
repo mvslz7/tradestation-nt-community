@@ -1,0 +1,20 @@
+{
+  "Symbol": "$SPX.X 250321C05800000",
+  "Description": "SPX Mar 21 2025 5800 Call",
+  "AssetType": "OPTION",
+  "Currency": "USD",
+  "Underlying": "$SPX.X",
+  "ExpirationDate": "2025-03-21T00:00:00Z",
+  "StrikePrice": "5800.00",
+  "OptionType": "Call",
+  "PriceFormat": {
+    "Decimals": 2,
+    "Increment": "0.01",
+    "PointValue": 100
+  },
+  "QuantityFormat": {
+    "Decimals": 0,
+    "Increment": "1",
+    "MinimumTradeQuantity": "1"
+  }
+}

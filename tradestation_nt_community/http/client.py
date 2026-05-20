@@ -11,6 +11,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
+from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -65,6 +66,8 @@ class OrderRejectedException(Exception):
         self.ts_message = ts_message
 
 from tradestation_nt_community.common.enums import TradeStationBarUnit
+from tradestation_nt_community.common.enums import ExpirationTypeParam, OptionExpiration
+from tradestation_nt_community.parsing.instruments import parse_expiration_date
 
 _ALLOWED_HOSTS = frozenset({
     "api.tradestation.com",
@@ -357,6 +360,82 @@ class TradeStationHttpClient:
             symbols = data.get("Symbols", [])
             return symbols[0] if symbols else {}
         return data[0] if isinstance(data, list) and data else data
+
+    async def get_option_expirations(
+        self,
+        underlying: str,
+        expiration_type: ExpirationTypeParam = "monthly",
+    ) -> list[OptionExpiration]:
+        """
+        Get available option expiration dates for an underlying symbol.
+
+        Parameters
+        ----------
+        underlying : str
+            The underlying symbol (e.g. ``"AAPL"``, ``"$SPX.X"``).
+        expiration_type : ExpirationTypeParam, default "monthly"
+            Filter by expiration type: ``"all"``, ``"weekly"``,
+            ``"monthly"``, or ``"quarterly"``.
+
+        Return
+        -------
+        list[OptionExpiration]
+            List of expiration dates with their type.
+
+        """
+        url = f"{self.base_url}/marketdata/options/expirations/{underlying}"
+        params: dict[str, str] = {"expirationtype": expiration_type}
+        response = await self._request("GET", url, params=params)
+        if response.status_code != 200:
+            _log.debug(
+                f"get_option_expirations failed — URL: {url} params: {params} "
+                f"HTTP {response.status_code} body: {response.text[:500]}"
+            )
+            raise Exception(
+                f"Get option expirations failed: HTTP {response.status_code} — {response.text[:300]}"
+            )
+        return [parse_expiration_date(e) for e in response.json().get("Expirations", [])]
+
+    async def get_option_strikes(
+        self,
+        underlying: str,
+        expiration: date | None = None,
+    ) -> list[str]:
+        """
+        Get available option strike prices for an underlying symbol.
+
+        Parameters
+        ----------
+        underlying : str
+            The underlying symbol (e.g. ``"AAPL"``, ``"$SPX.X"``).
+        expiration : date | None, optional
+            Filter strikes to a specific expiration date. The date is sent
+            to the API in American format (``MM-DD-YYYY``).
+
+        Return
+        -------
+        list[str]
+            Strike prices as strings (e.g. ``["175.00", "180.00"]``).
+
+        """
+        url = f"{self.base_url}/marketdata/options/strikes/{underlying}"
+        params: dict[str, str] = {}
+        if expiration is not None:
+            params["expiration"] = expiration.strftime("%m-%d-%Y")
+        response = await self._request("GET", url, params=params)
+        if response.status_code != 200:
+            _log.debug(
+                f"get_option_strikes failed — URL: {url} params: {params} "
+                f"HTTP {response.status_code} body: {response.text[:500]}"
+            )
+            raise Exception(
+                f"Get option strikes failed: HTTP {response.status_code} — {response.text[:300]}"
+            )
+        # The API returns Strikes as a list of leg-groups: [["250"], ["255"], ...]
+        # For single options each group has one element; spreads have two.
+        # We return the first leg of each group as a flat list of strike strings.
+        raw = response.json().get("Strikes", [])
+        return [legs[0] for legs in raw if legs]
 
     # =========================================================================
     # Account & Order Execution Methods

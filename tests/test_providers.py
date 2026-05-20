@@ -434,3 +434,47 @@ class TestLoadSingleTimeout:
                 await instrument_provider._load_single(iid)
         finally:
             instrument_provider._LOAD_TIMEOUT_S = original_timeout
+
+
+@pytest.mark.asyncio
+async def test_load_index_instrument_parses_correctly(
+    instrument_provider,
+    mock_http_client,
+):
+    from nautilus_trader.model.instruments import Equity
+
+    INDEX_RESPONSE = load_sample_data("symbol_detail_index.json")
+    mock_http_client.get_symbol_details.return_value = INDEX_RESPONSE
+
+    instrument_id = InstrumentId(Symbol("$SPX.X"), TRADESTATION_VENUE)
+    await instrument_provider.load_async(instrument_id)
+    instrument = instrument_provider.find(instrument_id)
+
+    assert instrument is not None
+    assert isinstance(instrument, Equity)
+    assert instrument.id.symbol.value == "$SPX.X"
+    assert instrument.isin is None
+
+
+@pytest.mark.asyncio
+async def test_load_index_option_has_index_asset_class(
+    instrument_provider,
+    mock_http_client,
+):
+    from nautilus_trader.model.instruments import OptionContract
+    from nautilus_trader.model.enums import AssetClass, OptionKind
+
+    INDEX_OPTION_RESPONSE = load_sample_data("symbol_detail_index_option.json")
+    mock_http_client.get_symbol_details.return_value = INDEX_OPTION_RESPONSE
+
+    symbol = "$SPX.X 250321C05800000"
+    instrument_id = InstrumentId(Symbol(symbol), TRADESTATION_VENUE)
+    await instrument_provider.load_async(instrument_id)
+    instrument = instrument_provider.find(instrument_id)
+
+    assert instrument is not None
+    assert isinstance(instrument, OptionContract)
+    assert instrument.asset_class == AssetClass.INDEX
+    assert instrument.option_kind == OptionKind.CALL
+    assert float(instrument.strike_price) == pytest.approx(5800.0, rel=1e-4)
+    assert instrument.underlying == "$SPX.X"

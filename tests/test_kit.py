@@ -76,6 +76,46 @@ class TSTestInstrumentStubs:
         )
 
     @staticmethod
+    def spx_index() -> Equity:
+        """Build a $SPX.X index instrument matching symbol_detail_index.json."""
+        instrument_id = InstrumentId(Symbol("$SPX.X"), Venue("TRADESTATION"))
+        return Equity(
+            instrument_id=instrument_id,
+            raw_symbol=Symbol("$SPX.X"),
+            currency=USD,
+            price_precision=2,
+            price_increment=Price(0.01, 2),
+            lot_size=Quantity.from_int(1),
+            isin=None,
+            ts_event=0,
+            ts_init=0,
+        )
+
+    @staticmethod
+    def spx_call_option() -> OptionContract:
+        """Build a $SPX.X Mar 21 2025 5800 Call matching symbol_detail_index_option.json."""
+        instrument_id = InstrumentId(
+            Symbol("$SPX.X 250321C05800000"), Venue("TRADESTATION"),
+        )
+        return OptionContract(
+            instrument_id=instrument_id,
+            raw_symbol=Symbol("$SPX.X 250321C05800000"),
+            asset_class=AssetClass.INDEX,
+            currency=USD,
+            price_precision=2,
+            price_increment=Price(0.01, 2),
+            multiplier=Quantity.from_int(100),
+            lot_size=Quantity.from_int(1),
+            underlying="$SPX.X",
+            option_kind=OptionKind.CALL,
+            strike_price=Price(5800.0, 2),
+            expiration_ns=pd.Timestamp("2025-03-21", tz="UTC").value,
+            activation_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+
+    @staticmethod
     def aapl_call_option() -> OptionContract:
         """Build an AAPL Mar 21 2025 175 Call option matching symbol_detail_option.json."""
         instrument_id = InstrumentId(
@@ -113,6 +153,18 @@ class TSTestDataStubs:
     def quote_response() -> dict:
         """Return the quote fixture as a parsed dict."""
         return json.loads((RESOURCES / "quote_response.json").read_text())
+
+    @staticmethod
+    def option_expirations_response() -> list[dict]:
+        """Return the raw option expirations fixture list."""
+        data = json.loads((RESOURCES / "option_expirations_response.json").read_text())
+        return data.get("Expirations", [])
+
+    @staticmethod
+    def option_strikes_response() -> list[str]:
+        """Return the raw option strikes fixture list."""
+        data = json.loads((RESOURCES / "option_strikes_response.json").read_text())
+        return data.get("Strikes", [])
 
 
 class TSTestOrderStubs:
