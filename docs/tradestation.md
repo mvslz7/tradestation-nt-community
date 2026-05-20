@@ -98,7 +98,7 @@ config = TradeStationExecClientConfig(
 |---|---|---|
 | `STOCK` | `Equity` | US equities and ETFs |
 | `FUTURE` | `FuturesContract` | CME, NYMEX, CBOT, EUREX |
-| `OPTION` | `OptionContract` | OCC format (`AAPL 250321C00175000`) — loading only, no execution |
+| `OPTION` | `OptionContract` | OCC format (`AAPL 250321C00175000`) — full execution support with BuyToOpen / SellToOpen |
 
 ### Bar Subscriptions
 
@@ -217,7 +217,6 @@ Example: `AAPL 250321C00175000` = AAPL call, expiry 2025-03-21, strike $175.00.
 | `reduce_only` ignored | Flag is silently accepted but has no broker-side effect |
 | Fill polling latency | Without streaming, fills are detected within 5 seconds (poll interval) |
 | Partial fill events (FLP) | Tracked in order status reports; fill reports only include `FLL` (fully filled) orders |
-| No options execution | `OptionContract` instruments load correctly; order submission for options is not implemented |
 | Shared SSE connection per instrument | Quote tick and trade tick subscriptions share a single SSE connection per instrument via a multiplexer |
 
 ## Troubleshooting

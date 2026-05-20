@@ -1124,3 +1124,161 @@ class TestTokenKeepalive:
             exec_client._token_keepalive_task = object()  # should not reach
 
         assert exec_client._token_keepalive_task is None
+
+
+# ---------------------------------------------------------------------------
+# Option order conversion
+# ---------------------------------------------------------------------------
+
+
+class TestOptionOrderConversion:
+    """Tests for _convert_order_to_ts_format() with OptionContract instruments."""
+
+    def _make_exec_client(self, instrument):
+        """Build a minimal execution client mock wired for option conversion tests."""
+        from tradestation_nt_community.execution import TradeStationExecutionClient
+
+        exec_client = MagicMock(spec=TradeStationExecutionClient)
+        exec_client._account_id = "SIM0000001F"
+        exec_client._extended_hours = False
+        cache = MagicMock()
+        cache.instrument.return_value = instrument
+        cache.positions_open.return_value = []
+        exec_client._cache = cache
+
+        # Delegate to the real static method
+        exec_client._convert_order_to_ts_format = (
+            TradeStationExecutionClient._convert_order_to_ts_format.__get__(
+                exec_client, TradeStationExecutionClient,
+            )
+        )
+        return exec_client
+
+    def _make_market_buy(self, symbol: str = "AAPL 250321C00175000") -> object:
+        from nautilus_trader.model.orders import MarketOrder
+        order = MarketOrder(
+            trader_id=TraderId("T-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str(f"{symbol}.TRADESTATION"),
+            client_order_id=ClientOrderId("O-BUY"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1), time_in_force=TimeInForce.DAY,
+            init_id=UUID4(), ts_init=0,
+        )
+        return order
+
+    def _make_limit_sell(self, symbol: str = "AAPL 250321C00175000") -> object:
+        from nautilus_trader.model.orders import LimitOrder
+        order = LimitOrder(
+            trader_id=TraderId("T-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str(f"{symbol}.TRADESTATION"),
+            client_order_id=ClientOrderId("O-SELL"), order_side=OrderSide.SELL,
+            quantity=Quantity.from_int(1), price=Price(3.0, 2),
+            time_in_force=TimeInForce.DAY, init_id=UUID4(), ts_init=0,
+        )
+        return order
+
+    def test_option_buy_maps_to_buytoopen(self):
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        order = self._make_market_buy()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "BuyToOpen"
+        assert params["asset_type"] == "OP"
+
+    def test_option_sell_maps_to_selltoopen(self):
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        order = self._make_limit_sell()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "SellToOpen"
+        assert params["asset_type"] == "OP"
+
+    def test_option_symbol_with_spaces_preserved(self):
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        order = self._make_market_buy()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["symbol"] == "AAPL 250321C00175000"
+
+    def test_option_limit_price_preserved(self):
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        order = self._make_limit_sell()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert "limit_price" in params
+        assert float(params["limit_price"]) == pytest.approx(3.0, rel=1e-4)
+
+    def test_equity_still_uses_original_trade_action(self):
+        """Regression: adding OptionContract branch does not break equity behavior."""
+        from tests.test_kit import TSTestInstrumentStubs
+        from nautilus_trader.model.orders import MarketOrder
+        instrument = TSTestInstrumentStubs.aapl_equity()
+        exec_client = self._make_exec_client(instrument)
+        order = MarketOrder(
+            trader_id=TraderId("T-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str("AAPL.TRADESTATION"),
+            client_order_id=ClientOrderId("O-EQ"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1), time_in_force=TimeInForce.DAY,
+            init_id=UUID4(), ts_init=0,
+        )
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        # Equity BUY with no position → Buy (open long)
+        assert params["trade_action"] == "Buy"
+        assert "asset_type" not in params
+
+    def test_futures_still_uses_buy_sell(self):
+        """Regression: adding OptionContract branch does not break futures behavior."""
+        from tests.test_kit import TSTestInstrumentStubs
+        from nautilus_trader.model.orders import MarketOrder
+        instrument = TSTestInstrumentStubs.gc_futures_contract()
+        exec_client = self._make_exec_client(instrument)
+        order = MarketOrder(
+            trader_id=TraderId("T-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str("GCJ26.TRADESTATION"),
+            client_order_id=ClientOrderId("O-FU"), order_side=OrderSide.SELL,
+            quantity=Quantity.from_int(1), time_in_force=TimeInForce.DAY,
+            init_id=UUID4(), ts_init=0,
+        )
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        # Futures always use Buy/Sell
+        assert params["trade_action"] == "Sell"
+        assert "asset_type" not in params
+
+    def test_stop_limit_option_buytoopen(self):
+        """StopLimit BUY + OptionContract → BuyToOpen with stop and limit prices."""
+        from tests.test_kit import TSTestInstrumentStubs
+        from nautilus_trader.model.enums import TriggerType
+        from nautilus_trader.model.orders import StopLimitOrder
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        order = StopLimitOrder(
+            trader_id=TraderId("T-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str("AAPL 250321C00175000.TRADESTATION"),
+            client_order_id=ClientOrderId("O-SL"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1),
+            price=Price(3.50, 2), trigger_price=Price(3.25, 2),
+            trigger_type=TriggerType.DEFAULT,
+            time_in_force=TimeInForce.DAY, init_id=UUID4(), ts_init=0,
+        )
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "BuyToOpen"
+        assert params["asset_type"] == "OP"
+        assert float(params["limit_price"]) == pytest.approx(3.50, rel=1e-4)
+        assert float(params["stop_price"]) == pytest.approx(3.25, rel=1e-4)

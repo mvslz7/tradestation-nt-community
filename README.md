@@ -109,12 +109,13 @@ export TRADESTATION_ACCOUNT_ID="your_account_id"
 |--------|---------|-------------|
 | `account_id` | required | TradeStation account ID for trading |
 | `use_streaming` | `False` | SSE order stream for real-time fill detection |
+| `account_type` | `"MARGIN"` | Account type: `"MARGIN"` or `"CASH"` |
 
 ## Supported Instruments
 
 - **Futures** (e.g., `ESM26`, `GCQ26`, `NQM26`)
 - **Equities** (e.g., `AAPL`, `MSFT`)
-- **Options** (OCC format, e.g., `AAPL 250321C00175000`)
+- **Options** (OCC format, e.g., `AAPL 250321C00175000`) — full execution support with BuyToOpen/SellToOpen
 
 ## Supported Order Types
 
@@ -184,7 +185,6 @@ from tradestation_nt_community import OrderRejectedException, DuplicateOrderConf
 - TradeStation rejects FOK orders -- use DAY for all orders
 - `reduce_only` is silently ignored by the adapter (safe to include)
 - No partial fill (FLP) handling -- only full fills (FLL) trigger events
-- Options: instrument loading only (order submission for options not implemented)
 
 ## Related
 

@@ -235,6 +235,13 @@ class TradeStationLiveExecClientFactory(LiveExecClientFactory):
             allow_custom_base_url=config.allow_custom_base_url,
         )
 
+        # Resolve account type from config string to enum
+        from nautilus_trader.model.enums import AccountType
+        try:
+            account_type = AccountType[config.account_type.upper()]
+        except KeyError:
+            account_type = AccountType.MARGIN
+
         # Create and return execution client
         return TradeStationExecutionClient(
             loop=loop,
@@ -249,4 +256,5 @@ class TradeStationLiveExecClientFactory(LiveExecClientFactory):
             streaming_reconnect_delay_secs=config.streaming_reconnect_delay_secs,
             extended_hours=config.extended_hours,
             order_map_path=config.order_map_path,
+            account_type=account_type,
         )

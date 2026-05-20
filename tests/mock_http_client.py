@@ -79,6 +79,8 @@ class MockTradeStationHttpClient(TradeStationHttpClient):
             json.loads((_RESOURCES / "order_limit_open.json").read_text()),
             json.loads((_RESOURCES / "order_stop_filled.json").read_text()),
             json.loads((_RESOURCES / "order_canceled.json").read_text()),
+            json.loads((_RESOURCES / "order_option_market_filled.json").read_text()),
+            json.loads((_RESOURCES / "order_option_limit_open.json").read_text()),
         ]
 
     async def place_order_group(
@@ -89,8 +91,12 @@ class MockTradeStationHttpClient(TradeStationHttpClient):
     async def place_order(
         self, account_id, symbol, quantity, order_type, trade_action,
         time_in_force="DAY", limit_price=None, stop_price=None,
+        order_confirm_id=None, asset_type=None,
     ) -> dict[str, Any]:
-        data = json.loads((_RESOURCES / "place_order_response.json").read_text())
+        if asset_type == "OP":
+            data = json.loads((_RESOURCES / "place_order_option_response.json").read_text())
+        else:
+            data = json.loads((_RESOURCES / "place_order_response.json").read_text())
         return data.get("Orders", [{}])[0]
 
     async def replace_order(self, order_id: str, *args, **kwargs) -> dict[str, Any]:

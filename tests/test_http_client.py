@@ -763,3 +763,115 @@ class TestCachedHttpClientFactory:
             "run_paper_trading.py and factories.py must share the same HTTP client "
             "so that _token_keepalive_loop refreshes the token used by HEAL/RECON/SWEEP"
         )
+
+
+# ---------------------------------------------------------------------------
+# AssetType passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestPlaceOrderAssetType:
+    """Verify that place_order() includes AssetType in the JSON body when set."""
+
+    @pytest.mark.asyncio
+    async def test_asset_type_included_when_op(self, http_client):
+        """When asset_type='OP', the JSON body must contain 'AssetType': 'OP'."""
+        http_client._access_token = "tok"
+        http_client.token_expiry = None
+        # Disable auth refresh
+        http_client._ensure_authenticated = AsyncMock()
+
+        # Capture the request body
+        post_mock = AsyncMock(return_value=_mock_resp(
+            200, data={"Orders": [{"OrderID": "OPT-1", "Status": "OPN"}]},
+        ))
+        http_client._httpx.post = post_mock
+
+        await http_client.place_order(
+            account_id="SIM123", symbol="AAPL 250321C00175000",
+            quantity="1", order_type="Limit", trade_action="BuyToOpen",
+            limit_price="3.00", asset_type="OP",
+        )
+
+        call_args = post_mock.call_args
+        json_body = call_args.kwargs.get("json", {})
+        assert json_body.get("AssetType") == "OP"
+        assert json_body.get("TradeAction") == "BuyToOpen"
+
+    @pytest.mark.asyncio
+    async def test_asset_type_absent_when_none(self, http_client):
+        """When asset_type is omitted (None), the JSON body does NOT contain AssetType."""
+        http_client._access_token = "tok"
+        http_client.token_expiry = None
+        http_client._ensure_authenticated = AsyncMock()
+
+        post_mock = AsyncMock(return_value=_mock_resp(
+            200, data={"Orders": [{"OrderID": "FUT-1", "Status": "OPN"}]},
+        ))
+        http_client._httpx.post = post_mock
+
+        await http_client.place_order(
+            account_id="SIM123", symbol="GCJ26",
+            quantity="1", order_type="Market", trade_action="Buy",
+        )
+
+        call_args = post_mock.call_args
+        json_body = call_args.kwargs.get("json", {})
+        assert "AssetType" not in json_body
+
+    @pytest.mark.asyncio
+    async def test_asset_type_eq_still_works(self, http_client):
+        """Explicit asset_type='EQ' for equities is also supported."""
+        http_client._access_token = "tok"
+        http_client.token_expiry = None
+        http_client._ensure_authenticated = AsyncMock()
+
+        post_mock = AsyncMock(return_value=_mock_resp(
+            200, data={"Orders": [{"OrderID": "EQ-1", "Status": "OPN"}]},
+        ))
+        http_client._httpx.post = post_mock
+
+        await http_client.place_order(
+            account_id="SIM123", symbol="AAPL",
+            quantity="1", order_type="Limit", trade_action="Buy",
+            limit_price="150.00", asset_type="EQ",
+        )
+
+        call_args = post_mock.call_args
+        json_body = call_args.kwargs.get("json", {})
+        assert json_body.get("AssetType") == "EQ"
+
+    @pytest.mark.asyncio
+    async def test_place_order_group_includes_asset_type(self, http_client):
+        """Group order legs with AssetType pass it through to the API."""
+        http_client._access_token = "tok"
+        http_client.token_expiry = None
+        http_client._ensure_authenticated = AsyncMock()
+
+        post_mock = AsyncMock(return_value=_mock_resp(
+            200, data={
+                "OrderGroupId": "GRP-1",
+                "Orders": [{"OrderID": "OPT-LEG1", "Status": "OPN"}],
+            },
+        ))
+        http_client._httpx.post = post_mock
+
+        await http_client.place_order_group(
+            group_type="OCO",
+            orders=[{
+                "AccountID": "SIM123",
+                "Symbol": "AAPL 250321C00175000",
+                "Quantity": "1",
+                "OrderType": "Limit",
+                "TradeAction": "BuyToOpen",
+                "TimeInForce": {"Duration": "DAY"},
+                "LimitPrice": "2.50",
+                "AssetType": "OP",
+            }],
+        )
+
+        call_args = post_mock.call_args
+        json_body = call_args.kwargs.get("json", {})
+        orders = json_body.get("Orders", [])
+        assert len(orders) == 1
+        assert orders[0].get("AssetType") == "OP"

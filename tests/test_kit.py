@@ -7,9 +7,9 @@ from pathlib import Path
 import pandas as pd
 
 from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.enums import AssetClass
+from nautilus_trader.model.enums import AssetClass, OptionKind
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
-from nautilus_trader.model.instruments import Equity, FuturesContract
+from nautilus_trader.model.instruments import Equity, FuturesContract, OptionContract
 from nautilus_trader.model.objects import Price, Quantity
 
 
@@ -75,6 +75,30 @@ class TSTestInstrumentStubs:
             ts_init=0,
         )
 
+    @staticmethod
+    def aapl_call_option() -> OptionContract:
+        """Build an AAPL Mar 21 2025 175 Call option matching symbol_detail_option.json."""
+        instrument_id = InstrumentId(
+            Symbol("AAPL 250321C00175000"), Venue("TRADESTATION"),
+        )
+        return OptionContract(
+            instrument_id=instrument_id,
+            raw_symbol=Symbol("AAPL 250321C00175000"),
+            asset_class=AssetClass.EQUITY,
+            currency=USD,
+            price_precision=2,
+            price_increment=Price(0.01, 2),
+            multiplier=Quantity.from_int(100),
+            lot_size=Quantity.from_int(1),
+            underlying="AAPL",
+            option_kind=OptionKind.CALL,
+            strike_price=Price(175.0, 2),
+            expiration_ns=pd.Timestamp("2025-03-21", tz="UTC").value,
+            activation_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+
 
 class TSTestDataStubs:
     """Static factory methods returning raw API response data for tests."""
@@ -133,3 +157,18 @@ class TSTestOrderStubs:
     def place_order_response() -> dict:
         """Return a successful place-order response."""
         return json.loads((RESOURCES / "place_order_response.json").read_text())
+
+    @staticmethod
+    def option_market_order_filled() -> dict:
+        """Return a filled option market order response dict."""
+        return json.loads((RESOURCES / "order_option_market_filled.json").read_text())
+
+    @staticmethod
+    def option_limit_order_open() -> dict:
+        """Return an open option limit order response dict."""
+        return json.loads((RESOURCES / "order_option_limit_open.json").read_text())
+
+    @staticmethod
+    def place_order_option_response() -> dict:
+        """Return a successful option order placement response."""
+        return json.loads((RESOURCES / "place_order_option_response.json").read_text())

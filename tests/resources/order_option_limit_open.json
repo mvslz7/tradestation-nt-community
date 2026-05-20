@@ -1,0 +1,18 @@
+{
+  "OrderID": "TS-OPT-002",
+  "Status": "OPN",
+  "StatusDescription": "Open",
+  "AccountID": "SIM0000001F",
+  "Symbol": "",
+  "Legs": [{"Symbol": "AAPL 250321C00175000", "AssetType": "OPTION", "BuyOrSell": "Sell", "QuantityOrdered": "1", "ExecQuantity": "0", "ExecutionPrice": "0"}],
+  "OrderType": "Limit",
+  "LimitPrice": "3.00",
+  "TradeAction": "SellToOpen",
+  "AssetType": "OP",
+  "TimeInForce": {"Duration": "DAY"},
+  "Quantity": "1",
+  "FilledQuantity": "0",
+  "AveragePrice": "0",
+  "UnfilledQuantity": "1",
+  "OpenedDateTime": "2025-03-14T15:35:00Z"
+}

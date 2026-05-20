@@ -109,6 +109,7 @@ class TradeStationExecutionClient(LiveExecutionClient):
         streaming_reconnect_delay_secs: float = 5.0,
         extended_hours: bool = False,
         order_map_path: str | None = None,
+        account_type: AccountType = AccountType.MARGIN,
     ) -> None:
         super().__init__(
             loop=loop,
@@ -116,7 +117,7 @@ class TradeStationExecutionClient(LiveExecutionClient):
             venue=None,  # Multi-venue support
             oms_type=OmsType.NETTING,  # Futures: one net position per instrument
             instrument_provider=instrument_provider,
-            account_type=AccountType.MARGIN,
+            account_type=account_type,
             base_currency=Currency.from_str("USD"),
             msgbus=msgbus,
             cache=cache,
@@ -588,8 +589,20 @@ class TradeStationExecutionClient(LiveExecutionClient):
         """
         orders = command.order_list.orders
 
+        # Determine asset_type from the first order's instrument so group
+        # legs carry the correct AssetType field (required for options).
+        group_asset_type: str | None = None
+        if orders:
+            instrument = self._cache.instrument(orders[0].instrument_id)
+            if instrument is not None:
+                from nautilus_trader.model.instruments import OptionContract
+                if isinstance(instrument, OptionContract):
+                    group_asset_type = "OP"
+
         # Try group submission first
-        group_result = convert_order_list_to_ts_group(orders, self._account_id)
+        group_result = convert_order_list_to_ts_group(
+            orders, self._account_id, asset_type=group_asset_type,
+        )
         if group_result is not None:
             group_type, order_payloads = group_result
             await self._submit_order_group(
@@ -1370,12 +1383,25 @@ class TradeStationExecutionClient(LiveExecutionClient):
 
         For futures: always Buy/Sell (TS rejects SellShort/BuyToCover on futures).
         For equities: use SellShort when opening a short, BuyToCover when closing a short.
+        For options: use BuyToOpen / SellToOpen and set AssetType="OP".
         """
         params = convert_order_to_ts_format(order, self._account_id)
 
-        # Check if this is an equity instrument — if so, adjust TradeAction
         instrument = self._cache.instrument(order.instrument_id)
         if instrument is not None:
+            # -- OptionContract ---------------------------------------------------
+            from nautilus_trader.model.instruments import OptionContract
+            if isinstance(instrument, OptionContract):
+                params["asset_type"] = "OP"
+                # Simple mapping: BUY → BuyToOpen, SELL → SellToOpen.
+                # Strategies needing BuyToClose / SellToClose can be supported
+                # later via an explicit kwarg override.
+                if order.side == OrderSide.BUY:
+                    params["trade_action"] = "BuyToOpen"
+                else:
+                    params["trade_action"] = "SellToOpen"
+
+            # -- Equity -----------------------------------------------------------
             from nautilus_trader.model.instruments import Equity
             if isinstance(instrument, Equity):
                 # For equities, TS requires SellShort/BuyToCover for short positions

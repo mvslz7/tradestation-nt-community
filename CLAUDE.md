@@ -91,6 +91,5 @@ Core dependencies for the adapter: `nautilus_trader >= 1.200`, `httpx >= 0.27`, 
 - TradeStation rejects FOK orders -- use `TimeInForce.DAY`
 - `reduce_only` is silently ignored (no broker-side effect)
 - Only full fills (FLL) trigger fill reports; no partial fill (FLP) handling
-- Options: instrument loading works, but order submission is not implemented
 - TradeStation uses SSE (not WebSocket) for streaming
 - Instruments should be pre-loaded via `instrument_ids` config for reliable subscriptions

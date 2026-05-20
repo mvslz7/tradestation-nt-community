@@ -106,4 +106,5 @@ class TradeStationExecClientConfig(LiveExecClientConfig, frozen=True, kw_only=Tr
     use_streaming: bool = True  # Use SSE order stream for fill notifications (lower latency than polling)
     streaming_reconnect_delay_secs: float = 5.0  # Initial SSE reconnect delay
     extended_hours: bool = False  # If True, use DYP duration for equity orders (pre/post market)
+    account_type: str = "MARGIN"  # Account type: "MARGIN", "CASH", etc.
     order_map_path: str | None = None  # Path to persist order-ID map across restarts (T-2)

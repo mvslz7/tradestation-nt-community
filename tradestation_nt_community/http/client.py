@@ -564,6 +564,7 @@ class TradeStationHttpClient:
         limit_price: str | None = None,
         stop_price: str | None = None,
         order_confirm_id: str | None = None,
+        asset_type: str | None = None,
     ) -> dict[str, Any]:
         """
         Place an order with TradeStation.
@@ -585,7 +586,8 @@ class TradeStationHttpClient:
         order_type : str
             Order type: 'Market', 'Limit', 'StopMarket', 'StopLimit'.
         trade_action : str
-            'Buy', 'Sell', 'BuyToCover', 'SellShort'.
+            For equities/futures: 'Buy', 'Sell', 'BuyToCover', 'SellShort'.
+            For options: 'BuyToOpen', 'BuyToClose', 'SellToOpen', 'SellToClose'.
         time_in_force : str, default 'DAY'
             Time in force: 'DAY', 'GTC', 'GTD', etc.
         limit_price : str, optional
@@ -595,6 +597,11 @@ class TradeStationHttpClient:
         order_confirm_id : str, optional
             Caller-supplied idempotency key (≤ 22 chars). If omitted, one is
             generated automatically via ``uuid4().hex[:22]``.
+        asset_type : str, optional
+            TradeStation asset type: ``"EQ"`` (equity), ``"FU"`` (future),
+            or ``"OP"`` (option). When set, the ``AssetType`` field is
+            included in the JSON body. Required for option orders; optional
+            for equities and futures (TS infers from symbol).
 
         Return
         -------
@@ -626,6 +633,8 @@ class TradeStationHttpClient:
             "TimeInForce": {"Duration": time_in_force},
             "OrderConfirmId": confirm_id,
         }
+        if asset_type is not None:
+            order_data["AssetType"] = asset_type
         if order_type in ("Limit", "StopLimit") and limit_price:
             order_data["LimitPrice"] = limit_price
         if order_type in ("StopMarket", "StopLimit") and stop_price:

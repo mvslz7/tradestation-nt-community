@@ -84,7 +84,11 @@ def convert_time_in_force(tif: TimeInForce) -> str:
     return _TIF_TO_TS.get(tif, "DAY")
 
 
-def convert_order_to_ts_format(order: Order, account_id: str) -> dict[str, Any]:
+def convert_order_to_ts_format(
+    order: Order,
+    account_id: str,
+    asset_type: str | None = None,
+) -> dict[str, Any]:
     """Convert a NautilusTrader order to the kwargs dict for TradeStationHttpClient.place_order.
 
     Parameters
@@ -93,6 +97,10 @@ def convert_order_to_ts_format(order: Order, account_id: str) -> dict[str, Any]:
         The order to convert.
     account_id : str
         The TradeStation account ID.
+    asset_type : str, optional
+        The TradeStation asset type (``"EQ"``, ``"FU"``, or ``"OP"``).
+        When provided, it is included as the ``asset_type`` key so the HTTP
+        client emits the ``AssetType`` field in the JSON body.
 
     Returns
     -------
@@ -112,6 +120,9 @@ def convert_order_to_ts_format(order: Order, account_id: str) -> dict[str, Any]:
         "trade_action": ts_trade_action,
         "time_in_force": ts_tif,
     }
+
+    if asset_type is not None:
+        params["asset_type"] = asset_type
 
     if isinstance(order, LimitOrder):
         params["limit_price"] = str(order.price)
@@ -177,7 +188,7 @@ def parse_order_status_report(
         price = Price.from_str(price_str) if price_str != "0" else None
 
         trade_action = ts_order.get("TradeAction", "Buy")
-        side = OrderSide.BUY if trade_action in ("Buy", "BuyToCover") else OrderSide.SELL
+        side = OrderSide.BUY if trade_action in ("Buy", "BuyToOpen", "BuyToClose", "BuyToCover") else OrderSide.SELL
 
         avg_px_str = ts_order.get("AveragePrice") or "0"
         avg_px = Price.from_str(avg_px_str) if avg_px_str != "0" else None
@@ -255,7 +266,7 @@ def parse_fill_report(
 
         # Order side
         trade_action = ts_order.get("TradeAction", "Buy")
-        order_side = OrderSide.BUY if trade_action in ("Buy", "BuyToCover") else OrderSide.SELL
+        order_side = OrderSide.BUY if trade_action in ("Buy", "BuyToOpen", "BuyToClose", "BuyToCover") else OrderSide.SELL
 
         # Timestamp
         closed_str = ts_order.get("ClosedDateTime", "") or ts_order.get("OpenedDateTime", "")
@@ -320,6 +331,7 @@ def _group_type_for_order_list(orders: list[Order]) -> str | None:
 def convert_order_list_to_ts_group(
     orders: list[Order],
     account_id: str,
+    asset_type: str | None = None,
 ) -> tuple[str, list[dict]] | None:
     """Convert an NT OrderList into a TradeStation group order payload.
 
@@ -329,6 +341,9 @@ def convert_order_list_to_ts_group(
         The orders from the OrderList (must be 2+ orders with contingencies).
     account_id : str
         The TradeStation account ID.
+    asset_type : str, optional
+        The TradeStation asset type (``"EQ"``, ``"FU"``, or ``"OP"``).
+        When provided, the ``AssetType`` field is included in each leg payload.
 
     Returns
     -------
@@ -342,7 +357,7 @@ def convert_order_list_to_ts_group(
 
     order_payloads = []
     for order in orders:
-        params = convert_order_to_ts_format(order, account_id)
+        params = convert_order_to_ts_format(order, account_id, asset_type=asset_type)
         # convert_order_to_ts_format returns kwargs for place_order;
         # the group API uses the same fields but in a dict with TS-style keys.
         payload: dict = {
@@ -353,6 +368,8 @@ def convert_order_list_to_ts_group(
             "TradeAction": params["trade_action"],
             "TimeInForce": {"Duration": params["time_in_force"]},
         }
+        if params.get("asset_type"):
+            payload["AssetType"] = params["asset_type"]
         if "limit_price" in params:
             payload["LimitPrice"] = params["limit_price"]
         if "stop_price" in params:

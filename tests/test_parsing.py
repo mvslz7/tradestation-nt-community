@@ -298,6 +298,99 @@ class TestParsingExecutionModule:
         assert float(params["stop_price"]) == pytest.approx(3200.0, rel=1e-4)
 
 
+class TestConvertOrderToTsFormatOptions:
+    """Tests for convert_order_to_ts_format() with asset_type for options."""
+
+    def _make_buy(self, symbol: str = "AAPL 250321C00175000") -> object:
+        from nautilus_trader.model.orders import MarketOrder
+        from nautilus_trader.model.identifiers import TraderId, StrategyId
+        from nautilus_trader.model.objects import Quantity
+        from nautilus_trader.core.uuid import UUID4
+        return MarketOrder(
+            trader_id=TraderId("TESTER-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str(f"{symbol}.TRADESTATION"),
+            client_order_id=ClientOrderId("O-OPT-BUY"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1), time_in_force=TimeInForce.DAY,
+            init_id=UUID4(), ts_init=0,
+        )
+
+    def _make_sell(self, symbol: str = "AAPL 250321C00175000") -> object:
+        from nautilus_trader.model.orders import LimitOrder
+        from nautilus_trader.model.identifiers import TraderId, StrategyId
+        from nautilus_trader.model.objects import Price, Quantity
+        from nautilus_trader.core.uuid import UUID4
+        return LimitOrder(
+            trader_id=TraderId("TESTER-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str(f"{symbol}.TRADESTATION"),
+            client_order_id=ClientOrderId("O-OPT-SELL"), order_side=OrderSide.SELL,
+            quantity=Quantity.from_int(1), price=Price(3.0, 2),
+            time_in_force=TimeInForce.DAY, init_id=UUID4(), ts_init=0,
+        )
+
+    def test_asset_type_included_when_set(self):
+        params = convert_order_to_ts_format(
+            self._make_buy(), "SIM0000001F", asset_type="OP",
+        )
+        assert params["asset_type"] == "OP"
+
+    def test_asset_type_absent_when_none(self):
+        params = convert_order_to_ts_format(
+            self._make_buy(), "SIM0000001F",
+        )
+        assert "asset_type" not in params
+
+    def test_trade_action_unchanged_by_asset_type_param(self):
+        """Setting asset_type alone does NOT change trade_action — caller must set it."""
+        params = convert_order_to_ts_format(
+            self._make_buy(), "SIM0000001F", asset_type="OP",
+        )
+        assert params["trade_action"] == "Buy"
+
+    def test_occ_symbol_preserved(self):
+        params = convert_order_to_ts_format(
+            self._make_buy(), "SIM0000001F", asset_type="OP",
+        )
+        assert params["symbol"] == "AAPL 250321C00175000"
+
+    def test_stop_limit_includes_both_prices_with_asset_type(self):
+        from nautilus_trader.model.enums import TriggerType
+        from nautilus_trader.model.orders import StopLimitOrder
+        from nautilus_trader.model.identifiers import TraderId, StrategyId
+        from nautilus_trader.model.objects import Price, Quantity
+        from nautilus_trader.core.uuid import UUID4
+        order = StopLimitOrder(
+            trader_id=TraderId("TESTER-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str("AAPL 250321C00175000.TRADESTATION"),
+            client_order_id=ClientOrderId("O-SL1"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1),
+            price=Price(3.50, 2), trigger_price=Price(3.25, 2),
+            trigger_type=TriggerType.DEFAULT,
+            time_in_force=TimeInForce.DAY, init_id=UUID4(), ts_init=0,
+        )
+        params = convert_order_to_ts_format(order, "SIM0000001F", asset_type="OP")
+        assert params["asset_type"] == "OP"
+        assert "limit_price" in params
+        assert "stop_price" in params
+        assert float(params["limit_price"]) == pytest.approx(3.50, rel=1e-4)
+        assert float(params["stop_price"]) == pytest.approx(3.25, rel=1e-4)
+
+    def test_futures_no_asset_type_still_works(self):
+        """Backward compat: futures order without asset_type param behaves as before."""
+        from nautilus_trader.model.orders import MarketOrder
+        from nautilus_trader.model.identifiers import TraderId, StrategyId
+        from nautilus_trader.model.objects import Quantity
+        from nautilus_trader.core.uuid import UUID4
+        order = MarketOrder(
+            trader_id=TraderId("TESTER-001"), strategy_id=StrategyId("S-001"),
+            instrument_id=InstrumentId.from_str("GCJ26.TRADESTATION"),
+            client_order_id=ClientOrderId("O-FUT"), order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(1), time_in_force=TimeInForce.DAY,
+            init_id=UUID4(), ts_init=0,
+        )
+        params = convert_order_to_ts_format(order, "SIM0000001F")
+        assert "asset_type" not in params
+        assert params["trade_action"] == "Buy"
+
 
 class TestParsingInstrumentsModule:
     """Tests for parsing.instruments — instrument parsing from TS symbol data."""
@@ -529,6 +622,58 @@ class TestParseFillReport:
         assert report is not None
         assert str(report.client_order_id) == "MY-ORDER-42"
 
+    def test_parse_fill_report_for_option(self):
+        """Fill report for an option order parses BuyToOpen → BUY side."""
+        from nautilus_trader.model.enums import OrderSide
+        report = parse_fill_report(
+            TSTestOrderStubs.option_market_order_filled(),
+            instrument_id=InstrumentId.from_str("AAPL 250321C00175000.TRADESTATION"),
+            account_id=_ACCOUNT_ID,
+            ts_now=_TS_NOW,
+        )
+        assert report is not None
+        assert report.order_side == OrderSide.BUY
+        assert float(report.last_px) == pytest.approx(2.50, rel=1e-4)
+        assert float(report.last_qty) == 1.0
+
+
+class TestOptionOrderStatusReportParsing:
+    """Tests for parse_order_status_report() with option orders."""
+
+    def _parse(self, ts_order, symbol="AAPL 250321C00175000") -> object:
+        from nautilus_trader.model.identifiers import ClientOrderId
+        instrument_id = InstrumentId.from_str(f"{symbol}.TRADESTATION")
+        return parse_order_status_report(
+            ts_order,
+            instrument_id=instrument_id,
+            client_order_id=ClientOrderId("O-OPT-001"),
+            account_id=_ACCOUNT_ID,
+            ts_now=_TS_NOW,
+        )
+
+    def test_option_filled_order_status(self):
+        report = self._parse(TSTestOrderStubs.option_market_order_filled())
+        assert report is not None
+        assert report.order_status == OrderStatus.FILLED
+
+    def test_option_filled_order_buy_side(self):
+        from nautilus_trader.model.enums import OrderSide
+        report = self._parse(TSTestOrderStubs.option_market_order_filled())
+        assert report is not None
+        # BuyToOpen should be parsed as BUY side
+        assert report.order_side == OrderSide.BUY
+
+    def test_option_open_order_sell_side(self):
+        from nautilus_trader.model.enums import OrderSide
+        report = self._parse(TSTestOrderStubs.option_limit_order_open())
+        assert report is not None
+        # SellToOpen should be parsed as SELL side
+        assert report.order_side == OrderSide.SELL
+
+    def test_option_open_order_price(self):
+        report = self._parse(TSTestOrderStubs.option_limit_order_open())
+        assert report is not None
+        assert float(report.price) == pytest.approx(3.00, rel=1e-4)
 
 
 class TestParseOptionInstrument:
