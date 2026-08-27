@@ -23,10 +23,16 @@ Then set the printed token:
 import http.server
 import json
 import os
+import queue
 import sys
+import threading
 import urllib.parse
 import urllib.request
 import webbrowser
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _AUTH_URL = "https://signin.tradestation.com/authorize"
 _TOKEN_URL = "https://signin.tradestation.com/oauth/token"
@@ -54,6 +60,21 @@ def _exchange_code(client_id: str, client_secret: str, code: str) -> dict:
         sys.exit(1)
 
 
+def _maybe_update_dotenv(refresh_token: str) -> None:
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, "r") as f:
+        lines = f.readlines()
+    key = "TRADESTATION_REFRESH_TOKEN"
+    updated = [f'{key}="{refresh_token}"\n' if l.startswith(key + "=") else l for l in lines]
+    if updated == lines:
+        return  # key not present — don't append, just leave it
+    with open(env_path, "w") as f:
+        f.writelines(updated)
+    print(f"✅ Updated {key} in {env_path}")
+
+
 def main() -> None:
     client_id = os.getenv("TRADESTATION_CLIENT_ID") or input("Client ID: ").strip()
     client_secret = os.getenv("TRADESTATION_CLIENT_SECRET") or input("Client Secret: ").strip()
@@ -70,20 +91,22 @@ def main() -> None:
     })
     auth_url = f"{_AUTH_URL}?{auth_params}"
 
-    # One-shot handler that captures the auth code from the redirect.
-    result: dict = {}
+    # result_q receives the first outcome from either the HTTP server (local
+    # machine) or stdin paste (remote machine — browser hits localhost on the
+    # client side, not this server).
+    result_q: queue.Queue = queue.Queue()
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             if "code" in qs:
-                result["code"] = qs["code"][0]
+                result_q.put({"code": qs["code"][0]})
                 body = b"<h2>Authorization successful - you can close this tab.</h2>"
                 self.send_response(200)
             elif "error" in qs:
                 err = qs.get("error", ["unknown"])[0]
                 desc = qs.get("error_description", [""])[0]
-                result["error"] = f"{err}: {desc}"
+                result_q.put({"error": f"{err}: {desc}"})
                 body = f"<h2>Error: {err} — {desc}</h2>".encode()
                 self.send_response(400)
             else:
@@ -95,23 +118,66 @@ def main() -> None:
             self.wfile.write(body)
 
         def log_message(self, *_args) -> None:
-            pass  # suppress access log noise
+            pass
 
     try:
         server = http.server.HTTPServer(("localhost", _REDIRECT_PORT), _Handler)
+        server.timeout = 1.0  # poll so the thread can notice result_q is filled
     except OSError as e:
         print(f"❌ Could not bind to port {_REDIRECT_PORT}: {e}")
         print(f"   Kill whatever is using that port, or change _REDIRECT_PORT in this script")
         print(f"   (and update your app's Redirect URI to match).")
         sys.exit(1)
 
+    stop_serving = threading.Event()
+
+    def _serve() -> None:
+        while not stop_serving.is_set():
+            server.handle_request()
+
+    serve_thread = threading.Thread(target=_serve, daemon=True)
+    serve_thread.start()
+
     print(f"\nOpening browser for TradeStation login ...")
     print(f"If the browser does not open, visit:\n\n  {auth_url}\n")
     webbrowser.open(auth_url)
 
-    # Block until the browser hits our server.
-    server.handle_request()
-    server.server_close()
+    # Remote-machine fallback: after login the browser redirects to
+    # http://localhost:{_REDIRECT_PORT}/?code=... on the *client* machine,
+    # not this server.  The user copies that URL and pastes it here.
+    print(f"Running on a remote machine?  After login your browser will show a")
+    print(f"  http://localhost:{_REDIRECT_PORT}/?code=...  URL that fails to load.")
+    print(f"Copy that full URL and paste it here, then press Enter")
+    print(f"(leave blank and press Enter if the redirect worked automatically):\n")
+
+    def _read_paste() -> None:
+        try:
+            line = sys.stdin.readline().strip()
+        except (EOFError, OSError):
+            return
+        if not line:
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(line).query)
+        if "code" in qs:
+            result_q.put({"code": qs["code"][0]})
+        elif "error" in qs:
+            err = qs.get("error", ["unknown"])[0]
+            desc = qs.get("error_description", [""])[0]
+            result_q.put({"error": f"{err}: {desc}"})
+        else:
+            result_q.put({"error": f"Could not parse a code from: {line!r}"})
+
+    threading.Thread(target=_read_paste, daemon=True).start()
+
+    try:
+        result = result_q.get(timeout=300)
+    except queue.Empty:
+        print("\n❌ Timed out waiting for authorization (5 min).")
+        sys.exit(1)
+    finally:
+        stop_serving.set()
+        serve_thread.join(timeout=2.0)  # wait for _serve to exit before closing socket
+        server.server_close()
 
     if "error" in result:
         print(f"\n❌ Authorization failed: {result['error']}")
@@ -131,6 +197,8 @@ def main() -> None:
         print("   Make sure 'offline_access' scope is enabled for your app in the TS developer portal.")
         print(f"   Full response: {tokens}")
         sys.exit(1)
+
+    _maybe_update_dotenv(refresh_token)
 
     print("\n" + "=" * 60)
     print("Refresh Token:")

@@ -92,6 +92,30 @@ export TRADESTATION_REFRESH_TOKEN="your_refresh_token"
 export TRADESTATION_ACCOUNT_ID="your_account_id"
 ```
 
+### Getting a Refresh Token
+
+`TRADESTATION_REFRESH_TOKEN` is not something you type in manually — obtain it via
+the included OAuth helper script, which runs the Authorization Code flow through
+a local browser login:
+
+```bash
+python get_refresh_token.py
+```
+
+This starts a local server on `http://localhost:3000`, opens your browser to
+TradeStation's login page, and exchanges the resulting authorization code for a
+refresh token, which it prints for you to export.
+
+Prerequisites:
+- Create an app at the [TradeStation Developer Portal](https://developer.tradestation.com/)
+- Add `http://localhost:3000` as a Redirect URI in the app settings
+- Ensure the app has the `offline_access` scope enabled and allows the
+  `refresh_token` grant type — without this, refreshing will fail with
+  `403 unauthorized_client: Grant type 'refresh_token' not allowed for the client`
+
+Refresh tokens can rotate or expire; re-run the script to mint a new one if
+authentication starts failing with a 403.
+
 ## Configuration Options
 
 ### Data Client

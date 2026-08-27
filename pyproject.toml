@@ -56,4 +56,5 @@ target-version = "py311"
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
+    "python-dotenv>=1.0",
 ]

@@ -83,6 +83,13 @@ The data client supports two modes configured via `use_streaming`:
 
 Tests use a `MockTradeStationHttpClient` (in `tests/mock_http_client.py`) that returns fixture data from `tests/resources/*.json`. No live API calls are needed. Test stubs and factory helpers are in `tests/test_kit.py`.
 
+`tests/sandbox_validate_options.py` is a separate, non-pytest integration script that hits the real
+TradeStation sandbox API using credentials from `.env` (`TRADESTATION_CLIENT_ID/SECRET/REFRESH_TOKEN/ACCOUNT_ID`).
+It discovers a live option, checks market data, and places/cancels a far-OTM order. Run it directly:
+`python tests/sandbox_validate_options.py`. If it fails auth with a 403, the refresh token needs
+regenerating via `python get_refresh_token.py` (see README's "Getting a Refresh Token" section) --
+this requires an interactive browser login and cannot be run non-interactively.
+
 Core dependencies for the adapter: `nautilus_trader >= 1.200`, `httpx >= 0.27`, `pandas`.
 
 ## Known Constraints
