@@ -16,11 +16,16 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Any
+from urllib.parse import quote
 from urllib.parse import urlparse
 
 import httpx
 
 _log = logging.getLogger(__name__)
+
+# Guards response.json() against pathologically large bodies (only reachable
+# in practice via a misconfigured/overridden base_url — see allow_custom_base_url).
+_MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 
 
 class DuplicateOrderConfirmIdException(Exception):
@@ -194,7 +199,7 @@ class TradeStationHttpClient:
                 _log.info(f"Retrying token refresh (attempt {attempt + 1}/3)")
             response = await self._httpx.post(self.auth_url, data=data)
             if response.status_code == 200:
-                token_data = response.json()
+                token_data = self._safe_json(response)
                 self._access_token = token_data["access_token"]
                 expires_in = token_data.get("expires_in", 1200)
                 self.token_expiry = datetime.now(tz=timezone.utc) + timedelta(seconds=expires_in)
@@ -219,6 +224,21 @@ class TradeStationHttpClient:
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
+
+    def _safe_json(self, response: httpx.Response) -> Any:
+        """Parse *response* as JSON, rejecting pathologically large bodies.
+
+        Guards against a misconfigured/malicious ``base_url`` override
+        returning a multi-gigabyte body that would otherwise be fully
+        deserialized into memory.
+        """
+        content_length = len(response.content)
+        if content_length > _MAX_RESPONSE_BYTES:
+            raise ValueError(
+                f"Response body too large ({content_length} bytes > "
+                f"{_MAX_RESPONSE_BYTES} byte limit) — refusing to parse JSON"
+            )
+        return response.json()
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Send an authenticated request, retrying on HTTP 429.
@@ -288,7 +308,7 @@ class TradeStationHttpClient:
             List of bar data dictionaries.
 
         """
-        url = f"{self.base_url}/marketdata/barcharts/{symbol}"
+        url = f"{self.base_url}/marketdata/barcharts/{quote(symbol, safe='$')}"
         params: dict[str, str] = {"interval": interval, "unit": unit.value}
         if barsback:
             params["barsback"] = str(barsback)
@@ -302,7 +322,7 @@ class TradeStationHttpClient:
         if response.status_code != 200:
             _log.debug(f"Get bars failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"TradeStation get bars failed: HTTP {response.status_code}")
-        return response.json().get("Bars", [])
+        return self._safe_json(response).get("Bars", [])
 
     async def search_symbols(
         self,
@@ -325,7 +345,7 @@ class TradeStationHttpClient:
             List of symbol search results.
 
         """
-        url = f"{self.base_url}/marketdata/symbols/search/{search_text}"
+        url = f"{self.base_url}/marketdata/symbols/search/{quote(search_text, safe='$')}"
         params = {}
         if category:
             params["category"] = category
@@ -333,7 +353,7 @@ class TradeStationHttpClient:
         if response.status_code != 200:
             _log.debug(f"Symbol search failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Symbol search failed: HTTP {response.status_code}")
-        return response.json()
+        return self._safe_json(response)
 
     async def get_symbol_details(self, symbol: str) -> dict[str, Any]:
         """
@@ -350,12 +370,12 @@ class TradeStationHttpClient:
             Symbol details including contract specifications.
 
         """
-        url = f"{self.base_url}/marketdata/symbols/{symbol}"
+        url = f"{self.base_url}/marketdata/symbols/{quote(symbol, safe='$')}"
         response = await self._request("GET", url)
         if response.status_code != 200:
             _log.debug(f"Get symbol details failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get symbol details failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         if isinstance(data, dict) and "Symbols" in data:
             symbols = data.get("Symbols", [])
             return symbols[0] if symbols else {}
@@ -383,7 +403,7 @@ class TradeStationHttpClient:
             List of expiration dates with their type.
 
         """
-        url = f"{self.base_url}/marketdata/options/expirations/{underlying}"
+        url = f"{self.base_url}/marketdata/options/expirations/{quote(underlying, safe='$')}"
         params: dict[str, str] = {"expirationtype": expiration_type}
         response = await self._request("GET", url, params=params)
         if response.status_code != 200:
@@ -394,7 +414,7 @@ class TradeStationHttpClient:
             raise Exception(
                 f"Get option expirations failed: HTTP {response.status_code} — {response.text[:300]}"
             )
-        return [parse_expiration_date(e) for e in response.json().get("Expirations", [])]
+        return [parse_expiration_date(e) for e in self._safe_json(response).get("Expirations", [])]
 
     async def get_option_strikes(
         self,
@@ -418,7 +438,7 @@ class TradeStationHttpClient:
             Strike prices as strings (e.g. ``["175.00", "180.00"]``).
 
         """
-        url = f"{self.base_url}/marketdata/options/strikes/{underlying}"
+        url = f"{self.base_url}/marketdata/options/strikes/{quote(underlying, safe='$')}"
         params: dict[str, str] = {}
         if expiration is not None:
             params["expiration"] = expiration.strftime("%m-%d-%Y")
@@ -434,7 +454,7 @@ class TradeStationHttpClient:
         # The API returns Strikes as a list of leg-groups: [["250"], ["255"], ...]
         # For single options each group has one element; spreads have two.
         # We return the first leg of each group as a flat list of strike strings.
-        raw = response.json().get("Strikes", [])
+        raw = self._safe_json(response).get("Strikes", [])
         return [legs[0] for legs in raw if legs]
 
     # =========================================================================
@@ -456,7 +476,7 @@ class TradeStationHttpClient:
         if response.status_code != 200:
             _log.debug(f"Get accounts failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get accounts failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         return data.get("Accounts", []) if isinstance(data, dict) else data
 
     async def get_balances(self, account_keys: str) -> dict[str, Any]:
@@ -474,12 +494,12 @@ class TradeStationHttpClient:
             Account balance information.
 
         """
-        url = f"{self.base_url}/brokerage/accounts/{account_keys}/balances"
+        url = f"{self.base_url}/brokerage/accounts/{quote(account_keys, safe=',')}/balances"
         response = await self._request("GET", url)
         if response.status_code != 200:
             _log.debug(f"Get balances failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get balances failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         if isinstance(data, dict) and "Balances" in data:
             balances = data.get("Balances", [])
             return balances[0] if balances else {}
@@ -500,12 +520,12 @@ class TradeStationHttpClient:
             List of position dictionaries.
 
         """
-        url = f"{self.base_url}/brokerage/accounts/{account_keys}/positions"
+        url = f"{self.base_url}/brokerage/accounts/{quote(account_keys, safe=',')}/positions"
         response = await self._request("GET", url)
         if response.status_code != 200:
             _log.debug(f"Get positions failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get positions failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         return data.get("Positions", []) if isinstance(data, dict) else data
 
     def _generate_order_confirm_id(self) -> str:
@@ -724,7 +744,7 @@ class TradeStationHttpClient:
             _log.debug(f"Place order failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Place order failed (HTTP {response.status_code}): {response.text[:200]}")
 
-        response_json = response.json()
+        response_json = self._safe_json(response)
         has_error, is_duplicate, err, msg = self._check_order_body_error(response_json)
 
         if not has_error:
@@ -773,7 +793,7 @@ class TradeStationHttpClient:
             Replacement confirmation response.
 
         """
-        url = f"{self.base_url}/orderexecution/orders/{order_id}"
+        url = f"{self.base_url}/orderexecution/orders/{quote(order_id, safe='')}"
         order_data: dict[str, Any] = {
             "AccountID": account_id,
             "Symbol": symbol,
@@ -791,7 +811,7 @@ class TradeStationHttpClient:
         if response.status_code not in (200, 201):
             _log.debug(f"Replace order failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Replace order failed (HTTP {response.status_code}): {response.text[:200]}")
-        return response.json()
+        return self._safe_json(response)
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         """
@@ -808,13 +828,13 @@ class TradeStationHttpClient:
             Cancellation confirmation response.
 
         """
-        url = f"{self.base_url}/orderexecution/orders/{order_id}"
+        url = f"{self.base_url}/orderexecution/orders/{quote(order_id, safe='')}"
         response = await self._request("DELETE", url)
         if response.status_code not in (200, 204):
             _log.debug(f"Cancel order failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Cancel order failed (HTTP {response.status_code}): {response.text[:200]}")
         try:
-            return response.json()
+            return self._safe_json(response)
         except Exception:
             return {"OrderID": order_id, "Status": "Cancelled"}
 
@@ -847,7 +867,7 @@ class TradeStationHttpClient:
             List of order dictionaries.
 
         """
-        url = f"{self.base_url}/brokerage/accounts/{account_keys}/orders"
+        url = f"{self.base_url}/brokerage/accounts/{quote(account_keys, safe=',')}/orders"
         params: dict[str, str] = {}
         if since:
             params["since"] = since
@@ -857,7 +877,7 @@ class TradeStationHttpClient:
         if response.status_code != 200:
             _log.debug(f"Get orders failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get orders failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         return data.get("Orders", []) if isinstance(data, dict) else data
 
     async def place_order_group(
@@ -928,7 +948,7 @@ class TradeStationHttpClient:
             _log.debug(f"Place order group failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Place order group failed (HTTP {response.status_code}): {response.text[:200]}")
 
-        response_json = response.json()
+        response_json = self._safe_json(response)
 
         has_error, is_duplicate, err, msg = self._check_order_body_error(response_json)
 
@@ -971,12 +991,12 @@ class TradeStationHttpClient:
             LastSize, Volume, Symbol, and TimeStamp.
 
         """
-        url = f"{self.base_url}/marketdata/quotes/{symbols}"
+        url = f"{self.base_url}/marketdata/quotes/{quote(symbols, safe=',')}"
         response = await self._request("GET", url)
         if response.status_code != 200:
             _log.debug(f"Get quotes failed (HTTP {response.status_code}): {response.text[:500]}")
             raise Exception(f"Get quotes failed: HTTP {response.status_code}")
-        data = response.json()
+        data = self._safe_json(response)
         return data.get("Quotes", []) if isinstance(data, dict) else data
 
     async def close(self) -> None:

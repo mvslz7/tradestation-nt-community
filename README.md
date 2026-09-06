@@ -180,6 +180,49 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
+## Scheduled Sandbox Validation
+
+`tests/sandbox_validate_options.py` is a standalone script (not part of the
+`pytest` suite) that exercises the full options flow against the live
+TradeStation sandbox: instrument discovery, market data, SSE quote
+streaming, order place/modify/cancel, a deliberate-rejection case, and
+reconciliation. See the "Sandbox validation" section of `TODO.md` for what
+it covers.
+
+A local cron job runs it automatically on weekdays so it gets exercised
+during market hours without anyone needing to trigger it manually:
+
+```
+30 15 * * 1-5 /home/ubuntu/workarea/tradestation-nt-community/.venv/bin/python /home/ubuntu/workarea/tradestation-nt-community/tests/sandbox_validate_options.py >> /home/ubuntu/workarea/tradestation-nt-community/logs/cron_stderr.log 2>&1
+```
+
+That's 11:30 AM US Eastern (15:30 UTC while Eastern is on EDT, i.e. through
+~2026-11-01 — after DST ends it needs to become `30 16` to stay at 11:30 ET).
+
+**Where it lives:** in the `ubuntu` user's crontab (not a file in this repo).
+View, edit, or remove it with the standard `crontab` command:
+
+```bash
+# View the current crontab (including the comment block explaining the job)
+crontab -l
+
+# Edit interactively (opens $EDITOR)
+crontab -e
+
+# Remove ALL cron jobs for this user (there's currently only this one)
+crontab -r
+```
+
+To remove just this job without wiping the whole crontab, use `crontab -e`,
+delete the job's lines, save, and exit.
+
+**Output:** every run writes a timestamped, self-contained log to
+`logs/sandbox_validate_options_<timestamp>.log` (git-ignored) — per-phase
+PASS/WARN/FAIL, full tracebacks on any crash, and a summary table at the
+end. `logs/cron_stderr.log` only catches output from failures severe enough
+that the script's own logging never got set up (e.g. the Python
+interpreter or venv itself being broken).
+
 ## Order Idempotency
 
 `place_order()` and `place_order_group()` automatically inject an `OrderConfirmId` (max

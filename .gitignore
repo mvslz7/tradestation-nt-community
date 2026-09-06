@@ -7,4 +7,5 @@ build/
 *.egg
 .env
 .venv/
+logs/
 

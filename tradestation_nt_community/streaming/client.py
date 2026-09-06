@@ -32,8 +32,10 @@ Usage
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Awaitable, Callable
+from urllib.parse import quote
 
 import httpx
 
@@ -42,6 +44,14 @@ _log = logging.getLogger(__name__)
 
 # Heartbeat lines that TradeStation sends to keep the connection alive.
 _HEARTBEAT_KEYS = {"Heartbeat", "heartbeat"}
+
+# Masks the account ID segment of /accounts/{id}/... URLs before logging —
+# account IDs are sensitive identifiers and shouldn't accumulate in log files.
+_ACCOUNT_PATH_RE = re.compile(r"(/accounts/)[^/]+")
+
+
+def _redact_account(url: str) -> str:
+    return _ACCOUNT_PATH_RE.sub(r"\1***", url)
 
 
 class TradeStationStreamClient:
@@ -112,7 +122,7 @@ class TradeStationStreamClient:
                         if resp.status_code != 200:
                             body = await resp.aread()
                             _log.error(
-                                f"SSE stream {url} returned {resp.status_code}: "
+                                f"SSE stream {_redact_account(url)} returned {resp.status_code}: "
                                 f"{body.decode(errors='replace')[:200]}"
                             )
                             if resp.status_code == 401 and self._on_auth_error:
@@ -127,7 +137,7 @@ class TradeStationStreamClient:
                             delay = min(delay * 2, self._max_delay)
                             continue
 
-                        _log.info(f"SSE stream connected: {url}")
+                        _log.info(f"SSE stream connected: {_redact_account(url)}")
                         delay = self._reconnect_delay  # reset on successful connect
 
                         if not first_connect:
@@ -153,15 +163,17 @@ class TradeStationStreamClient:
                             yield event
 
             except asyncio.CancelledError:
-                _log.info(f"SSE stream cancelled: {url}")
+                _log.info(f"SSE stream cancelled: {_redact_account(url)}")
                 return
             except httpx.ReadTimeout:
                 _log.warning(
                     f"SSE stream no data for 90s — zombie connection detected, "
-                    f"forcing reconnect: {url}"
+                    f"forcing reconnect: {_redact_account(url)}"
                 )
             except Exception as e:
-                _log.error(f"SSE stream error ({url}): {e} — reconnecting in {delay:.0f}s")
+                _log.error(
+                    f"SSE stream error ({_redact_account(url)}): {e} — reconnecting in {delay:.0f}s"
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self._max_delay)
 
@@ -181,7 +193,7 @@ class TradeStationStreamClient:
             Last, LastSize, Volume, TradeTime, etc.
 
         """
-        url = f"{self._base_url}/marketdata/stream/quotes/{symbols}"
+        url = f"{self._base_url}/marketdata/stream/quotes/{quote(symbols, safe=',$')}"
         async for event in self._stream(url):
             yield event
 
@@ -214,7 +226,7 @@ class TradeStationStreamClient:
             TimeStamp, Status (``"Historical"`` or ``"RealTime"``).
 
         """
-        url = f"{self._base_url}/marketdata/stream/barcharts/{symbol}"
+        url = f"{self._base_url}/marketdata/stream/barcharts/{quote(symbol, safe='$')}"
         params: dict[str, str] = {"interval": interval, "unit": unit, "barsback": "1"}
         if session_template:
             params["sessiontemplate"] = session_template
@@ -239,7 +251,7 @@ class TradeStationStreamClient:
             AveragePrice, TradeAction, etc.
 
         """
-        url = f"{self._base_url}/brokerage/stream/accounts/{account_id}/orders"
+        url = f"{self._base_url}/brokerage/stream/accounts/{quote(account_id, safe='')}/orders"
         async for event in self._stream(url):
             yield event
 
@@ -259,6 +271,6 @@ class TradeStationStreamClient:
             Price, Size, OrderCount, etc.
 
         """
-        url = f"{self._base_url}/marketdata/stream/marketdepth/{symbol}"
+        url = f"{self._base_url}/marketdata/stream/marketdepth/{quote(symbol, safe='$')}"
         async for event in self._stream(url):
             yield event

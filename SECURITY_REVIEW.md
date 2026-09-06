@@ -68,67 +68,27 @@ if session_template:
 
 ---
 
-### 5. User-supplied values interpolated into URL paths without encoding
+### 5. User-supplied values interpolated into URL paths without encoding -- FIXED
 
-**File:** `http/client.py` -- 10 endpoints; `streaming/client.py` -- 4 endpoints
+**Status:** Resolved.
 
-All URL paths use f-string interpolation of user-provided values:
-
-```python
-url = f"{self.base_url}/marketdata/barcharts/{symbol}"           # line 140
-url = f"{self.base_url}/marketdata/symbols/search/{search_text}" # line 176
-url = f"{self.base_url}/brokerage/accounts/{account_keys}/..."   # lines 246, 271, 435
-url = f"{self.base_url}/orderexecution/orders/{order_id}"        # lines 369, 405
-url = f"{self.base_url}/marketdata/quotes/{symbols}"             # line 499
-```
-
-**Risk:** In practice, these values come from NautilusTrader internals (instrument IDs, venue order IDs) -- not raw user input. The practical risk is low because the attack surface is limited to a developer misconfiguring symbol names. However, a `symbol` containing `../` or `?` characters could alter the request path. httpx does not automatically encode path components in pre-built URL strings.
-
-**Fix:** Apply `urllib.parse.quote()` to path segments:
-
-```python
-from urllib.parse import quote
-url = f"{self.base_url}/marketdata/barcharts/{quote(symbol, safe='')}"
-```
+All path segments built from caller-supplied values (`symbol`, `search_text`, `underlying`, `account_keys`, `order_id`, `symbols`) are now passed through `urllib.parse.quote()` in both `http/client.py` and `streaming/client.py`, with `safe=","` where TradeStation accepts comma-separated lists (account keys, quote symbols) and `safe="$"` preserved for index symbols like `$SPX.X`. Verified against the live sandbox that `$SPX.X`, comma-separated multi-symbol quotes, and space-containing OCC option symbols (e.g. `AAPL 260909C310`) all still resolve correctly post-encoding.
 
 ---
 
-### 6. SSE streaming client disables timeouts entirely
+### 6. SSE streaming client disables timeouts entirely -- FIXED
 
-**File:** `streaming/client.py` line 91
+**Status:** Resolved (prior to this review's fix pass — already addressed as part of the §70 stale-stream-reconnect fix).
 
-```python
-async with httpx.AsyncClient(timeout=None) as client:
-```
-
-`timeout=None` disables all timeouts (connect, read, write, pool).
-
-**Risk:** A misbehaving or compromised server that sends data extremely slowly (slowloris-style) holds the connection and its resources indefinitely. With multiple subscriptions, this could exhaust file descriptors or memory.
-
-**Fix:** Use a generous but bounded timeout. SSE connections are long-lived, so disable the read timeout but keep connect/write timeouts:
-
-```python
-async with httpx.AsyncClient(
-    timeout=httpx.Timeout(connect=30.0, read=None, write=30.0, pool=30.0)
-) as client:
-```
+`streaming/client.py`'s `_stream()` now uses a bounded timeout: `httpx.Timeout(connect=30.0, read=90.0, write=None, pool=30.0)`. A 90-second read timeout without any data (including heartbeats) is treated as a zombie connection and triggers an immediate reconnect rather than hanging indefinitely.
 
 ---
 
-### 7. Account ID embedded in logged SSE URLs
+### 7. Account ID embedded in logged SSE URLs -- FIXED
 
-**File:** `streaming/client.py` lines 96, 103, 123, 126
+**Status:** Resolved.
 
-```python
-_log.info(f"SSE stream connected: {url}")             # line 103
-_log.error(f"SSE stream error ({url}): {e} ...")       # line 126
-```
-
-For order streams, the URL contains the account ID: `.../accounts/{account_id}/orders`.
-
-**Risk:** Log files become a source of account enumeration if compromised.
-
-**Fix:** Mask the account ID in log output, or log only the endpoint path without the account ID.
+All URLs logged from `streaming/client.py` (`SSE stream connected`, `SSE stream error`, `SSE stream cancelled`, the non-200 response log, and the zombie-reconnect warning) now pass through `_redact_account()`, which replaces the `/accounts/{id}/` path segment with `/accounts/***/` before logging. Order-stream URLs (the only ones containing an account ID) no longer accumulate the account ID in log files; quote/bar/depth URLs are unaffected since they don't contain one.
 
 ---
 
@@ -140,13 +100,11 @@ For order streams, the URL contains the account ID: `.../accounts/{account_id}/o
 
 ---
 
-### 9. No response size bounds on JSON parsing
+### 9. No response size bounds on JSON parsing -- FIXED
 
-**File:** `http/client.py` -- all `response.json()` calls
+**Status:** Resolved.
 
-No `max_content_length` or size check before calling `response.json()`. A malicious or misconfigured API response with a multi-gigabyte JSON body would be deserialized fully into memory.
-
-**Risk:** Low in practice (connecting to TradeStation's own servers), but relevant if `base_url` is overridden (see finding #3).
+All `response.json()` calls in `http/client.py` now go through a `_safe_json()` wrapper that checks `len(response.content)` against a 25 MB cap and raises `ValueError` before parsing if exceeded. This doesn't prevent httpx from buffering an oversized body in the first place (that would require streaming the response), but it stops the more expensive `json.loads()` deserialization step from running on a pathological body — relevant only if `base_url` is overridden (see finding #3).
 
 ---
 
@@ -171,9 +129,11 @@ No `max_content_length` or size check before calling `response.json()`. A malici
 | 1 | Raw `response.text` in exceptions / logs | **HIGH** | `http/client.py` (13 locations) |
 | 2 | Credentials as public attrs, no cleanup | **HIGH** | `http/client.py:47-49,66`, `factories.py:21` |
 | 3 | Unvalidated `base_url` enables credential theft | **HIGH** | `config.py:47,98`, `http/client.py:59` |
-| 4 | Query string injection in `stream_bars()` | **MEDIUM** | `streaming/client.py:179-183` |
-| 5 | URL path segments not encoded | **MEDIUM** | `http/client.py` (10 sites), `streaming/client.py` (4 sites) |
-| 6 | SSE client `timeout=None` | **MEDIUM** | `streaming/client.py:91` |
-| 7 | Account ID in log messages | **MEDIUM** | `streaming/client.py:96,103,123,126` |
-| 8 | Deprecated `datetime.utcnow()` | **LOW** | `http/client.py:82,98` |
-| 9 | No response size bounds | **LOW** | `http/client.py` (all `.json()` calls) |
+| 4 | Query string injection in `stream_bars()` | **MEDIUM** | `streaming/client.py:179-183` — FIXED |
+| 5 | URL path segments not encoded | **MEDIUM** | `http/client.py` (10 sites), `streaming/client.py` (4 sites) — FIXED |
+| 6 | SSE client `timeout=None` | **MEDIUM** | `streaming/client.py:91` — FIXED |
+| 7 | Account ID in log messages | **MEDIUM** | `streaming/client.py:96,103,123,126` — FIXED |
+| 8 | Deprecated `datetime.utcnow()` | **LOW** | `http/client.py:82,98` — FIXED |
+| 9 | No response size bounds | **LOW** | `http/client.py` (all `.json()` calls) — FIXED |
+
+All findings from this review are now resolved.
