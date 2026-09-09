@@ -93,6 +93,9 @@ class TradeStationOrderStatus(str, Enum):
     LAT = "LAT"  # Too Late
     DON = "DON"  # Done for Day
     UCN = "UCN"  # User Canceled
+    OUT = "OUT"  # Out of the market -- canceled/removed from the order book
+                 # (observed live; treated as CANCELED in parsing/execution.py
+                 # and execution.py's order-monitoring loops)
     TSC = "TSC"  # Trailing Stop Canceled
     OPN = "OPN"  # Open
     UPD = "UPD"  # Updated

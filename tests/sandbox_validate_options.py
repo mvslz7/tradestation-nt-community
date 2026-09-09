@@ -582,8 +582,16 @@ async def phase3_order_lifecycle(
         out(f"   ⚠️  Could not re-fetch orders: {e}")
         return True  # cancel was confirmed — don't fail
 
+    # Terminal statuses — mirrors the exact set execution.py's own live-order
+    # monitoring (REST poll + SSE stream) treats as "canceled or expired"
+    # (CAN/UCN/OUT/EXP/DON), plus FLL since a filled order is also no longer
+    # open. Keep this in sync with the tuples in execution.py's
+    # _check_order_statuses() and _handle_order_stream_event() — this same
+    # script previously logged a false "still open" warning for "OUT"
+    # because it had its own narrower, hand-copied list.
+    _TERMINAL_STATUSES = ("CAN", "UCN", "OUT", "EXP", "DON", "FLL")
     still_open = [o for o in orders if o.get("OrderID") == order_id
-                  and o.get("Status") not in ("CAN", "UCN", "FLL")]
+                  and o.get("Status") not in _TERMINAL_STATUSES]
     if still_open:
         out(f"   ⚠️  Order still appears open: {still_open[0].get('Status')}")
     else:
