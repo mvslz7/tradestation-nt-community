@@ -38,9 +38,10 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,103 @@ def _is_market_closed_error(text: str) -> bool:
     """
     lowered = text.lower()
     return "routes are closed" in lowered or ("market" in lowered and "closed" in lowered)
+
+
+def _extract_order_id(response: Any) -> str | None:
+    """Pull the OrderID out of a place_order / place_order_group response."""
+    if not isinstance(response, dict):
+        return None
+    orders = response.get("Orders") or []
+    if orders and orders[0].get("OrderID"):
+        return orders[0]["OrderID"]
+    return response.get("OrderID")
+
+
+def _increment_for_price(price: float, price_format: dict | None) -> float:
+    """Tick size for *price* from a TradeStation ``PriceFormat``.
+
+    Equity options are penny-pilot tiered — penny below $3, nickel at/above $3
+    — expressed as an ``IncrementSchedule``. Falls back to a flat ``Increment``
+    field, then to $0.05 (the safer default for a near-ATM option premium).
+    """
+    price_format = price_format or {}
+    schedule = price_format.get("IncrementSchedule") or []
+    if schedule:
+        inc = 0.01
+        for tier in sorted(schedule, key=lambda t: float(t.get("StartsAt", 0) or 0)):
+            if price >= float(tier.get("StartsAt", 0) or 0):
+                inc = float(tier.get("Increment", inc) or inc)
+        return inc
+    try:
+        return float(price_format.get("Increment", 0.05)) or 0.05
+    except (TypeError, ValueError):
+        return 0.05
+
+
+def _round_to_increment(price: float, increment: float) -> str:
+    """Round *price* to a valid multiple of *increment* (Decimal, no FP drift)."""
+    from decimal import Decimal, ROUND_HALF_UP
+
+    inc = Decimal(str(increment)) if increment and increment > 0 else Decimal("0.05")
+    steps = (Decimal(str(price)) / inc).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return f"{steps * inc:.2f}"
+
+
+_INCREMENT_RE = re.compile(r"valid price increment \[\s*([0-9.]+)\s*\]")
+
+
+# Order statuses that mean "no longer working" — mirrors execution.py's
+# _check_order_statuses() / SSE handler (CAN/UCN/OUT/EXP/DON canceled-or-expired,
+# plus the fill/reject terminals).
+_TERMINAL_ORDER_STATUSES = ("FLL", "CAN", "UCN", "OUT", "EXP", "DON", "REJ", "BRO", "LAT")
+
+
+async def _wait_for_terminal_status(
+    client: TradeStationHttpClient,
+    account_id: str,
+    order_id: str,
+    timeout_s: float = 30.0,
+    poll_s: float = 2.0,
+) -> str:
+    """Poll /orders for *order_id* until it hits a terminal status.
+
+    Returns the final status string, or "TIMEOUT" if it never settled.
+    """
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_s)
+    last_status = "UNKNOWN"
+    while datetime.now(timezone.utc) < deadline:
+        try:
+            orders = await client.get_orders(account_id)
+        except Exception as e:
+            out(f"      ⚠️  poll get_orders failed: {e}")
+            await asyncio.sleep(poll_s)
+            continue
+        match = next((o for o in orders if o.get("OrderID") == order_id), None)
+        if match:
+            last_status = match.get("Status", "UNKNOWN")
+            if last_status in _TERMINAL_ORDER_STATUSES:
+                return last_status
+        await asyncio.sleep(poll_s)
+    return f"TIMEOUT(last={last_status})"
+
+
+async def _option_position_qty(
+    client: TradeStationHttpClient, account_id: str, symbol: str,
+) -> int:
+    """Signed net contracts held in *symbol* (>0 long, <0 short, 0 flat)."""
+    try:
+        positions = await client.get_positions(account_id)
+    except Exception as e:
+        out(f"      ⚠️  get_positions failed: {e}")
+        return 0
+    qty = 0
+    for p in positions:
+        if p.get("Symbol") == symbol:
+            try:
+                qty += int(float(p.get("Quantity", 0)))
+            except (TypeError, ValueError):
+                pass
+    return qty
 
 
 class _ConnectedFlagHandler(logging.Handler):
@@ -836,6 +934,212 @@ async def phase6_index_option(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: Position lifecycle (fill -> add -> partial close -> flatten)
+# ---------------------------------------------------------------------------
+
+
+async def phase7_position_lifecycle(
+    client: TradeStationHttpClient,
+    symbol: str,
+    account_id: str,
+) -> bool:
+    """Fill -> add -> partially close -> flatten a real option position.
+
+    This is the ONLY phase that places *marketable* orders meant to fill, so
+    it's the one that actually exercises: the fill path, position tracking,
+    adding to an existing position, and closing part of it via a raw
+    ``"SellToClose"`` trade action (which the Nautilus execution layer does
+    not emit yet — see TODO.md Gap 3c; the HTTP client accepts the string
+    directly, so this validates that TradeStation's sandbox honours it).
+
+    Safety: the position is flattened and working orders cancelled in a
+    ``finally`` block no matter how the phase exits, and any *pre-existing*
+    position in ``symbol`` is flattened before the phase starts — so a botched
+    prior run can't leave the sim account holding a naked option that
+    accumulates across daily cron runs. If cleanup itself can't flatten, the
+    log says "MANUAL CLEANUP" loudly.
+    """
+    out("\n" + "=" * 60)
+    out("PHASE 7: Position Lifecycle (fill -> add -> partial close -> flatten)")
+    out("=" * 60)
+
+    # ── Price marketable limits off the current quote ─────────────────────
+    try:
+        quotes = await client.get_quotes(symbol)
+    except Exception as e:
+        out(f"   ❌ get_quotes failed — cannot price marketable orders: {e}")
+        return False
+    if not quotes:
+        out("   ⚠️  No quote for the option — cannot price marketable orders, skipping")
+        return True
+
+    q = quotes[0]
+    bid = float(q.get("Bid") or 0)
+    ask = float(q.get("Ask") or 0)
+    if bid <= 0 or ask <= 0:
+        out(f"   ⚠️  No two-sided market (bid={bid} ask={ask}) — skipping position lifecycle")
+        return True
+
+    # Tick size is price-tiered for equity options (penny < $3, nickel >= $3).
+    try:
+        details = await client.get_symbol_details(symbol)
+        price_format = details.get("PriceFormat", {})
+    except Exception as e:
+        out(f"   ⚠️  get_symbol_details failed ({e}) — assuming $0.05 tick")
+        price_format = {}
+
+    # Cross the spread by a healthy margin so the order is genuinely marketable.
+    spread = ask - bid
+    cross = max(0.10, spread, round(ask * 0.05, 2))
+    buy_inc = _increment_for_price(ask + cross, price_format)
+    sell_inc = _increment_for_price(max(0.01, bid - cross), price_format)
+    buy_limit = _round_to_increment(ask + cross, buy_inc)
+    sell_limit = _round_to_increment(max(buy_inc, bid - cross), sell_inc)
+    out(f"   Quote bid={bid} ask={ask} spread={spread:.2f}  ->  "
+        f"buy_limit={buy_limit} (tick {buy_inc})  sell_limit={sell_limit} (tick {sell_inc})")
+
+    async def _place_and_wait(action: str, qty: str, limit: str, label: str) -> tuple[str, str | None]:
+        """Place one marketable option order, wait for it to settle. Returns (status, order_id)."""
+        out(f"\n   → {label}: {action} {qty} @ {limit} ...")
+        for attempt in (1, 2):
+            try:
+                resp = await client.place_order(
+                    account_id=account_id, symbol=symbol, quantity=qty,
+                    order_type="Limit", trade_action=action, time_in_force="DAY",
+                    limit_price=limit, asset_type="OP",
+                )
+            except Exception as e:
+                msg = str(e)
+                if _is_market_closed_error(msg):
+                    return "MARKET_CLOSED", None
+                m = _INCREMENT_RE.search(msg)
+                if m and attempt == 1:
+                    good_inc = float(m.group(1))
+                    limit = _round_to_increment(float(limit), good_inc)
+                    out(f"      price-increment reject — retrying rounded to {good_inc}: {limit}")
+                    continue
+                out(f"      ❌ place_order failed ({type(e).__name__}): {e}")
+                return f"REJECTED({type(e).__name__})", None
+
+            oid = _extract_order_id(resp)
+            if not oid:
+                if _is_market_closed_error(str(resp)):
+                    return "MARKET_CLOSED", None
+                out(f"      ❌ no OrderID in response: {resp}")
+                return "NO_ID", None
+            status = await _wait_for_terminal_status(client, account_id, oid)
+            out(f"      order {oid} -> {status}")
+            return status, oid
+        return "REJECTED(increment)", None
+
+    async def _flatten(reason: str) -> None:
+        out(f"\n   → Cleanup ({reason}): cancel working orders + flatten {symbol} ...")
+        try:
+            working = await client.get_orders(account_id, status="Open")
+        except Exception as e:
+            out(f"      ⚠️  could not list working orders: {e}")
+            working = []
+        for o in working:
+            if o.get("Symbol") == symbol and o.get("OrderID"):
+                try:
+                    await client.cancel_order(o["OrderID"])
+                    out(f"      cancelled working order {o['OrderID']}")
+                except Exception as e:
+                    out(f"      ⚠️  could not cancel {o['OrderID']}: {e}")
+
+        qty = await _option_position_qty(client, account_id, symbol)
+        if qty == 0:
+            out("      position flat ✅")
+            return
+        action = "SellToClose" if qty > 0 else "BuyToClose"
+
+        # Re-price off a FRESH quote and cross HARD — the phase-start limits may
+        # be stale by now, and cleanup must actually fill.
+        close_limit = sell_limit if qty > 0 else buy_limit
+        try:
+            fresh = (await client.get_quotes(symbol) or [{}])[0]
+            fb = float(fresh.get("Bid") or 0)
+            fa = float(fresh.get("Ask") or 0)
+            if fb > 0 and fa > 0:
+                if qty > 0:  # selling to close: bid off hard
+                    raw = max(0.01, fb - max(0.25, (fa - fb), fb * 0.15))
+                    close_limit = _round_to_increment(raw, _increment_for_price(raw, price_format))
+                else:  # buying to close a short: ask through hard
+                    raw = fa + max(0.25, (fa - fb), fa * 0.15)
+                    close_limit = _round_to_increment(raw, _increment_for_price(raw, price_format))
+        except Exception:
+            pass
+
+        out(f"      position {qty} not flat — {action} {abs(qty)} @ {close_limit}")
+        try:
+            status, _ = await _place_and_wait(action, str(abs(qty)), close_limit, "flatten")
+            if status != "FLL":
+                out(f"      ⚠️  flatten order status={status} — re-checking position")
+        except Exception as e:
+            out(f"      ❌ flatten place_order raised: {e}")
+        residual = await _option_position_qty(client, account_id, symbol)
+        if residual != 0:
+            out(f"      ❌ MANUAL CLEANUP NEEDED: {symbol} still shows {residual} "
+                f"contract(s) in {account_id}")
+
+    # ── Defensive pre-cleanup ────────────────────────────────────────────
+    pre_qty = await _option_position_qty(client, account_id, symbol)
+    if pre_qty != 0:
+        out(f"   ⚠️  Pre-existing position of {pre_qty} in {symbol} — flattening before start")
+        await _flatten("pre-existing position")
+
+    result = True
+    try:
+        # 7a. Open — marketable BuyToOpen x1
+        status, _ = await _place_and_wait("BuyToOpen", "1", buy_limit, "7a. Open")
+        if status == "MARKET_CLOSED":
+            out("   ⚠️  Market is closed — position lifecycle needs an open market, skipping")
+            return True
+        if status.startswith("REJECTED"):
+            out(f"   ⚠️  Opening order was rejected ({status}) — not a market-closed reject; "
+                "worth investigating (option permission? symbol? account?).")
+            return False
+        if status != "FLL":
+            out(f"   ⚠️  Opening order did not fill (status={status}). The sim engine may "
+                "not simulate option fills right now — nothing to add to / close.")
+            return True
+
+        qty = await _option_position_qty(client, account_id, symbol)
+        out(f"   ✅ Opened — position now {qty}" + ("" if qty == 1 else " (expected 1!)"))
+
+        # 7b. Add — marketable BuyToOpen x1 more
+        status, _ = await _place_and_wait("BuyToOpen", "1", buy_limit, "7b. Add to position")
+        qty = await _option_position_qty(client, account_id, symbol)
+        if status == "FLL" and qty == 2:
+            out("   ✅ Add-to-position confirmed (1 -> 2)")
+        else:
+            out(f"   ⚠️  Add-to-position not as expected (status={status}, position={qty})")
+            result = False
+
+        # 7c. Partial close — SellToClose x1 (raw trade action, see Gap 3c)
+        status, _ = await _place_and_wait("SellToClose", "1", sell_limit, "7c. Partial close")
+        qty = await _option_position_qty(client, account_id, symbol)
+        if status == "FLL" and qty == 1:
+            out("   ✅ Partial close confirmed (2 -> 1) — sandbox honours SellToClose")
+        elif status == "FLL":
+            out(f"   ⚠️  SellToClose filled but position is {qty}, expected 1")
+            result = False
+        else:
+            out(f"   ⚠️  SellToClose did not fill (status={status})")
+            result = False
+
+        return result
+    finally:
+        await _flatten("end of phase")
+        final_qty = await _option_position_qty(client, account_id, symbol)
+        if final_qty == 0:
+            out("   ✅ Position flat after cleanup")
+        else:
+            out(f"   ❌ Position NOT flat after cleanup: {final_qty} contract(s) — "
+                "MANUAL CLEANUP NEEDED")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -891,7 +1195,12 @@ def _print_summary(results: list[PhaseResult], log_path: Path) -> int:
     return 1 if hard_failures else 0
 
 
-async def main(underlying: str, index_sym: str, log_path: Path) -> int:
+async def main(
+    underlying: str,
+    index_sym: str,
+    log_path: Path,
+    run_position_lifecycle: bool = True,
+) -> int:
     """Run all sandbox validation phases.  Returns 0 on success, 1 on failure."""
     client_id = os.getenv("TRADESTATION_CLIENT_ID")
     client_secret = os.getenv("TRADESTATION_CLIENT_SECRET")
@@ -997,6 +1306,16 @@ async def main(underlying: str, index_sym: str, log_path: Path) -> int:
             phase6_index_option(client, index_sym),
         )
 
+        # Phase 7: Position lifecycle — places marketable orders that FILL,
+        # then adds and partially closes. Opt out with --skip-position-lifecycle.
+        if run_position_lifecycle:
+            await _run_phase(
+                results, "Phase 7: Position lifecycle (fill/add/partial-close)",
+                phase7_position_lifecycle(client, symbol, account_id),
+            )
+        else:
+            out("\n⏭️  Phase 7 (position lifecycle) skipped (--skip-position-lifecycle)")
+
     finally:
         await client.close()
 
@@ -1015,13 +1334,21 @@ if __name__ == "__main__":
         "--index", "-i", default="$SPX.X",
         help="Index symbol for index/index-option phases (default: $SPX.X)",
     )
+    parser.add_argument(
+        "--skip-position-lifecycle", action="store_true",
+        help="Skip Phase 7 — the only phase that places marketable orders "
+             "that actually fill and manages a real (sim) position",
+    )
     args = parser.parse_args()
 
     log_path = _setup_logging()
     out(f"Logging to: {log_path}")
 
     try:
-        exit_code = asyncio.run(main(args.underlying, args.index, log_path))
+        exit_code = asyncio.run(main(
+            args.underlying, args.index, log_path,
+            run_position_lifecycle=not args.skip_position_lifecycle,
+        ))
     except Exception:
         _log.exception("Sandbox validation crashed with an unhandled top-level exception")
         exit_code = 1

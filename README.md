@@ -185,9 +185,16 @@ pytest tests/ -q
 `tests/sandbox_validate_options.py` is a standalone script (not part of the
 `pytest` suite) that exercises the full options flow against the live
 TradeStation sandbox: instrument discovery, market data, SSE quote
-streaming, order place/modify/cancel, a deliberate-rejection case, and
-reconciliation. See the "Sandbox validation" section of `TODO.md` for what
-it covers.
+streaming, order place/modify/cancel, a deliberate-rejection case,
+reconciliation, and a **position lifecycle** phase (Phase 7) that places
+*marketable* orders which actually fill — open a position, add to it, then
+partially close it via `SellToClose` — and always flattens the position and
+cancels working orders afterward (even on failure), including any leftover
+from a botched prior run. See the "Sandbox validation" section of `TODO.md`
+for the full phase list.
+
+Pass `--skip-position-lifecycle` to run everything *except* Phase 7 (i.e. no
+orders that fill, no position management) — useful for a read-mostly check.
 
 A local cron job runs it automatically on weekdays so it gets exercised
 during market hours without anyone needing to trigger it manually:

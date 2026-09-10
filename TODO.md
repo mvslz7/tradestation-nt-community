@@ -6,13 +6,19 @@ Source, tests, and sandbox validation are all runnable in this environment
 (`.venv` has `nautilus_trader==1.227.0` installed). 392/392 unit tests pass.
 
 `tests/sandbox_validate_options.py` has been run live against the TradeStation
-sandbox multiple times, both with the market closed (2026-09-06) and — via the
-scheduled cron job — during market hours (2026-09-08). Every run logs to both
-the console and a timestamped file under `logs/` (git-ignored) so an
-unattended/scheduled run can be diagnosed after the fact without anyone
-watching it live. A weekday cron job keeps re-running it at ~11:30 ET; see
-`README.md`'s "Scheduled Sandbox Validation" section for how to view/edit/
-cancel it.
+sandbox many times — market closed (2026-09-06) and, via the scheduled cron
+job, during market hours every trading day since 2026-09-08 (all passing).
+Every run logs to both the console and a timestamped file under `logs/`
+(git-ignored) so an unattended/scheduled run can be diagnosed after the fact
+without anyone watching it live. A weekday cron job keeps re-running it at
+~11:30 ET; see `README.md`'s "Scheduled Sandbox Validation" section for how to
+view/edit/cancel it.
+
+**Phase 7 (position lifecycle)** was added 2026-09-10 — it places *marketable*
+orders that actually fill: open → add → partial close via `SellToClose`, then
+always flatten. It has only run against a *closed* market so far (skips
+cleanly); the first real fill happens at the next market-hours cron run. Pass
+`--skip-position-lifecycle` to run everything else without it.
 
 ---
 
@@ -37,15 +43,24 @@ called against an option symbol anywhere, in tests or examples; the endpoint
 is symbol-agnostic so it should work, but there's zero verification either way.
 
 **Execution**: place / modify (cancel-replace) / cancel all confirmed live
-against a real order book (2026-09-08 cron run). But only **`BuyToOpen`/
-`SellToOpen`** — opening positions only; see Gap 3c. OCO/bracket order groups
-(`place_order_group`) exist generically and are used by the futures/equities
-paths, but have never been sandbox-tested with option legs specifically —
-only mock-tested.
+against a real order book (2026-09-08 cron run).
+- Only **`BuyToOpen` / `SellToOpen`** are wired through the Nautilus execution
+  layer (`_convert_order_to_ts_format`: BUY→BuyToOpen, SELL→SellToOpen) —
+  opening positions only; see Gap 3c.
+- The HTTP client's `place_order()` accepts *any* trade-action string,
+  including `BuyToClose` / `SellToClose`. Phase 7 of the sandbox script uses
+  `SellToClose` directly (bypassing the Nautilus layer) to verify TradeStation
+  honours it and to inform the Gap 3c implementation — pending its first
+  market-hours run.
+- OCO/bracket order groups (`place_order_group`) exist generically and are
+  used by the futures/equities paths, but have never been sandbox-tested with
+  option legs specifically — only mock-tested.
 
 **Reconciliation**: status parsing is solid, including `OUT` (fixed
 2026-09-09 — see Gap 3b-2). Fill-report parsing (`parse_fill_report`) exists
 in code but has never run against a real fill — see "Untested workflows" below.
+Phase 7's real fills (once it runs during market hours) will feed this via the
+reconciliation phase.
 
 ---
 
@@ -67,6 +82,12 @@ in code but has never run against a real fill — see "Untested workflows" below
 - [x] **Phase 4: Reconciliation** — order listing fetch and report parsing work
 - [x] **Phase 5/6: Index + index option loading** — `$SPX.X` and a discovered
       index option both parse correctly (INDEX asset class)
+- [ ] **Phase 7: Position lifecycle** — marketable open → add → partial close
+      (`SellToClose`) → flatten. Added 2026-09-10. Runs clean against a closed
+      market (skips, cleans up, verified sim account left flat); **first real
+      fill pending a market-hours cron run**. Guaranteed flatten + working-order
+      cancel in a `finally` block, plus pre-run cleanup of any leftover
+      position.
 
 Run it yourself:
 ```bash
@@ -94,11 +115,16 @@ adapter *as NautilusTrader actually uses it* works.
 
 Roughly in order of how much each matters:
 
-1. **A real fill.** Every test order so far has used a deliberately-unfillable
-   far-OTM limit price, so `generate_order_filled` / `parse_fill_report`
-   against a genuine `FLL` status has never fired for an option.
-2. **Closing a position** (`BuyToClose`/`SellToClose`) — doesn't exist yet
-   (Gap 3c below), so untested by definition.
+1. **A real fill.** Until 2026-09-10 every test order used a
+   deliberately-unfillable far-OTM limit price. Phase 7 now places marketable
+   orders that should fill — but it has only run against a closed market so
+   far, so `generate_order_filled` / `parse_fill_report` against a genuine
+   `FLL` still hasn't fired for an option. The next market-hours cron run
+   closes this (via the raw HTTP client — still not the Nautilus layer, see
+   the "biggest gap" above).
+2. **Closing a position** — `BuyToClose`/`SellToClose` isn't wired through the
+   Nautilus layer (Gap 3c). Phase 7 exercises `SellToClose` via the raw HTTP
+   client; pending its first market-hours run.
 3. **Multi-leg spreads** — unsupported (see "What's currently supported" above).
 4. **OCO/bracket groups with option legs** — code exists, sandbox-untested.
 5. **Partial fills (FLP)** — adapter-wide known limitation (options especially
@@ -153,13 +179,18 @@ and is otherwise unreferenced anywhere in the codebase).
 
 ### 3c. `BuyToClose` / `SellToClose` support — still open
 
-Current mapping in `execution.py` (`_submit_order`) is simple:
+Current mapping in `execution.py` (`_convert_order_to_ts_format`) is simple:
 ```
 BUY  → BuyToOpen
 SELL → SellToOpen
 ```
 If a strategy needs to close an existing option position, add an optional
-`trade_action_override` kwarg to `_submit_order` / `_convert_order_to_ts_format`.
+`trade_action_override` kwarg to `_submit_order` / `_convert_order_to_ts_format`
+(or derive open-vs-close from the cached net position, like the Equity branch
+already does with SellShort/BuyToCover). Phase 7 of `sandbox_validate_options.py`
+already places `SellToClose` orders directly against the HTTP client — check
+its next market-hours log to confirm TradeStation's sandbox accepts them
+before implementing.
 
 ### 3d. Options example script — still open
 
@@ -178,8 +209,11 @@ natural home for the real-`TradingNode`-with-a-fill test discussed above.
       (2026-09-08)
 - [ ] Regression: existing futures + equities still work (run existing
       examples) — not yet done; see "Untested workflows" #9 above
-- [ ] Real fill + NautilusTrader integration layer exercised for options —
-      see "Untested workflows" above (new, added 2026-09-09)
+- [ ] Real fill via the raw HTTP client (Phase 7) — pending first
+      market-hours cron run (added 2026-09-10)
+- [ ] Real fill + NautilusTrader integration layer (`TradingNode` /
+      `TradeStationExecutionClient`) exercised for options — see "Untested
+      workflows" above (added 2026-09-09)
 - [x] README / CLAUDE.md / docs updated
 - [ ] CHANGELOG entry (if applicable)
 - [ ] Tag release `v0.2.0`
