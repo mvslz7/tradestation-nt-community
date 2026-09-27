@@ -1259,6 +1259,44 @@ class TestOptionOrderConversion:
         assert params["trade_action"] == "Sell"
         assert "asset_type" not in params
 
+    def test_option_buy_closes_existing_short_position(self):
+        """A BUY with an existing short option position should close it, not open a new long."""
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        exec_client._cache.positions_open.return_value = [MagicMock(signed_qty=-1)]
+        order = self._make_market_buy()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "BuyToClose"
+        assert params["asset_type"] == "OP"
+
+    def test_option_sell_closes_existing_long_position(self):
+        """A SELL with an existing long option position should close it, not open a new short."""
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        exec_client._cache.positions_open.return_value = [MagicMock(signed_qty=1)]
+        order = self._make_limit_sell()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "SellToClose"
+        assert params["asset_type"] == "OP"
+
+    def test_option_buy_with_no_position_still_opens(self):
+        """Regression: a flat BUY still maps to BuyToOpen (no position to close)."""
+        from tests.test_kit import TSTestInstrumentStubs
+        instrument = TSTestInstrumentStubs.aapl_call_option()
+        exec_client = self._make_exec_client(instrument)
+        exec_client._cache.positions_open.return_value = []
+        order = self._make_market_buy()
+
+        params = exec_client._convert_order_to_ts_format(order)
+
+        assert params["trade_action"] == "BuyToOpen"
+
     def test_stop_limit_option_buytoopen(self):
         """StopLimit BUY + OptionContract → BuyToOpen with stop and limit prices."""
         from tests.test_kit import TSTestInstrumentStubs

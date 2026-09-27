@@ -1383,7 +1383,9 @@ class TradeStationExecutionClient(LiveExecutionClient):
 
         For futures: always Buy/Sell (TS rejects SellShort/BuyToCover on futures).
         For equities: use SellShort when opening a short, BuyToCover when closing a short.
-        For options: use BuyToOpen / SellToOpen and set AssetType="OP".
+        For options: use BuyToOpen/SellToOpen when there's no opposing position to
+        close, BuyToClose/SellToClose when there is -- same net-position inference
+        used for equities below.
         """
         params = convert_order_to_ts_format(order, self._account_id)
 
@@ -1393,13 +1395,21 @@ class TradeStationExecutionClient(LiveExecutionClient):
             from nautilus_trader.model.instruments import OptionContract
             if isinstance(instrument, OptionContract):
                 params["asset_type"] = "OP"
-                # Simple mapping: BUY → BuyToOpen, SELL → SellToOpen.
-                # Strategies needing BuyToClose / SellToClose can be supported
-                # later via an explicit kwarg override.
+                open_positions = self._cache.positions_open(
+                    instrument_id=order.instrument_id,
+                )
+                net_pos = sum(
+                    p.signed_qty for p in open_positions
+                ) if open_positions else 0
+
                 if order.side == OrderSide.BUY:
-                    params["trade_action"] = "BuyToOpen"
+                    # A BUY closes an existing short (net_pos < 0); otherwise it
+                    # opens or adds to a long.
+                    params["trade_action"] = "BuyToClose" if net_pos < 0 else "BuyToOpen"
                 else:
-                    params["trade_action"] = "SellToOpen"
+                    # A SELL closes an existing long (net_pos > 0); otherwise it
+                    # opens or adds to a short.
+                    params["trade_action"] = "SellToClose" if net_pos > 0 else "SellToOpen"
 
             # -- Equity -----------------------------------------------------------
             from nautilus_trader.model.instruments import Equity
