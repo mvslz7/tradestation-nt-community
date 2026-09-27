@@ -20,8 +20,8 @@ from tradestation_nt_community.providers import TradeStationInstrumentProvider
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
-from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.messages import RequestBars
+from nautilus_trader.data.messages import RequestInstrument
 from nautilus_trader.data.messages import SubscribeBars
 from nautilus_trader.data.messages import SubscribeQuoteTicks
 from nautilus_trader.data.messages import SubscribeTradeTicks
@@ -762,13 +762,9 @@ class TradeStationDataClient(LiveMarketDataClient):
 
     # -- REQUESTS -------------------------------------------------------------
 
-    async def _request_instrument(
-        self,
-        instrument_id: InstrumentId,
-        correlation_id: UUID4,
-        start: pd.Timestamp | None = None,
-        end: pd.Timestamp | None = None,
-    ) -> None:
+    async def _request_instrument(self, request: RequestInstrument) -> None:
+        instrument_id = request.instrument_id
+
         # Load instrument if not in cache
         if instrument_id not in self._cache.instrument_ids():
             await self._instrument_provider.load_async(instrument_id)
@@ -782,7 +778,7 @@ class TradeStationDataClient(LiveMarketDataClient):
         instrument = self._cache.instrument(instrument_id)
 
         if instrument:
-            self._handle_data(instrument)
+            self._handle_instrument(instrument, request.id, request.start, request.end, request.params)
         else:
             self._log.error(f"Failed to load instrument: {instrument_id}")
 
