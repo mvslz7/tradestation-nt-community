@@ -107,6 +107,16 @@ class MockTradeStationHttpClient(TradeStationHttpClient):
             json.loads((_RESOURCES / "order_option_limit_open.json").read_text()),
         ]
 
+    async def get_historical_orders(self, account_keys: str, since: str, status: str | None = None) -> list[dict[str, Any]]:
+        return [
+            json.loads((_RESOURCES / "order_market_filled.json").read_text()),
+            json.loads((_RESOURCES / "order_limit_open.json").read_text()),
+            json.loads((_RESOURCES / "order_stop_filled.json").read_text()),
+            json.loads((_RESOURCES / "order_canceled.json").read_text()),
+            json.loads((_RESOURCES / "order_option_market_filled.json").read_text()),
+            json.loads((_RESOURCES / "order_option_limit_open.json").read_text()),
+        ]
+
     async def place_order_group(
         self, group_type: str, orders: list[dict[str, Any]],
     ) -> dict[str, Any]:

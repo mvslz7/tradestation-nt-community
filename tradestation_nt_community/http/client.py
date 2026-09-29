@@ -880,6 +880,65 @@ class TradeStationHttpClient:
         data = self._safe_json(response)
         return data.get("Orders", []) if isinstance(data, dict) else data
 
+    async def get_historical_orders(
+        self,
+        account_keys: str,
+        since: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Get historical orders for account(s) from TradeStation's dedicated
+        historical-orders endpoint.
+
+        Unlike :meth:`get_orders` (which hits ``/orders`` -- the current
+        session's activity, and reliably surfaces only recent/open/terminal
+        orders regardless of `since`), this hits ``/historicalorders``, which
+        is TradeStation's actual archive and respects `since` across fills,
+        cancels, and rejects. Paginates via `NextToken` until TradeStation
+        stops returning one.
+
+        Parameters
+        ----------
+        account_keys : str
+            Account key(s) — single or comma-separated.
+        since : str
+            Return orders since this date (format: 'MM-DD-YYYY'). Required --
+            TradeStation's historical orders endpoint has no "everything"
+            mode, and only accepts dates within the last 90 days.
+        status : str, optional
+            Filter by order status. Case-sensitive — see get_orders().
+
+        Return
+        -------
+        list[dict[str, Any]]
+            List of order dictionaries.
+
+        """
+        url = f"{self.base_url}/brokerage/accounts/{quote(account_keys, safe=',')}/historicalorders"
+        params: dict[str, str] = {"since": since}
+        if status:
+            params["status"] = status
+
+        orders: list[dict[str, Any]] = []
+        next_token: str | None = None
+        while True:
+            page_params = dict(params)
+            if next_token:
+                page_params["nextToken"] = next_token
+            response = await self._request("GET", url, params=page_params)
+            if response.status_code != 200:
+                _log.debug(
+                    f"Get historical orders failed (HTTP {response.status_code}): {response.text[:500]}"
+                )
+                raise Exception(f"Get historical orders failed: HTTP {response.status_code}")
+            data = self._safe_json(response)
+            page = data.get("Orders", []) if isinstance(data, dict) else data
+            orders.extend(page)
+            next_token = data.get("NextToken") if isinstance(data, dict) else None
+            if not next_token:
+                break
+        return orders
+
     async def place_order_group(
         self,
         group_type: str,

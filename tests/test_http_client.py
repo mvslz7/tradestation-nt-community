@@ -674,6 +674,52 @@ class TestPlaceOrderConfirmId:
 
 
 # =============================================================================
+# get_historical_orders (Group B)
+# =============================================================================
+
+class TestGetHistoricalOrders:
+    """get_historical_orders() hits /historicalorders and paginates via NextToken."""
+
+    async def test_single_page_returns_orders(self, http_client):
+        http_client._httpx.get = AsyncMock(
+            return_value=_mock_resp(200, {"Orders": [{"OrderID": "1"}, {"OrderID": "2"}]})
+        )
+
+        orders = await http_client.get_historical_orders(account_keys="SIM001", since="06-30-2026")
+
+        assert [o["OrderID"] for o in orders] == ["1", "2"]
+        params = http_client._httpx.get.call_args.kwargs["params"]
+        assert params == {"since": "06-30-2026"}
+
+    async def test_status_filter_included_in_params(self, http_client):
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(200, {"Orders": []}))
+
+        await http_client.get_historical_orders(account_keys="SIM001", since="06-30-2026", status="Rejected")
+
+        params = http_client._httpx.get.call_args.kwargs["params"]
+        assert params == {"since": "06-30-2026", "status": "Rejected"}
+
+    async def test_paginates_until_no_next_token(self, http_client):
+        page1 = _mock_resp(200, {"Orders": [{"OrderID": "1"}], "NextToken": "tok-2"})
+        page2 = _mock_resp(200, {"Orders": [{"OrderID": "2"}], "NextToken": "tok-3"})
+        page3 = _mock_resp(200, {"Orders": [{"OrderID": "3"}]})
+        http_client._httpx.get = AsyncMock(side_effect=[page1, page2, page3])
+
+        orders = await http_client.get_historical_orders(account_keys="SIM001", since="06-30-2026")
+
+        assert [o["OrderID"] for o in orders] == ["1", "2", "3"]
+        assert http_client._httpx.get.call_count == 3
+        last_params = http_client._httpx.get.call_args.kwargs["params"]
+        assert last_params["nextToken"] == "tok-3"
+
+    async def test_non_200_raises(self, http_client):
+        http_client._httpx.get = AsyncMock(return_value=_mock_resp(500, None))
+
+        with pytest.raises(Exception, match="Get historical orders failed"):
+            await http_client.get_historical_orders(account_keys="SIM001", since="06-30-2026")
+
+
+# =============================================================================
 # Exception shape tests (Group C)
 # =============================================================================
 
